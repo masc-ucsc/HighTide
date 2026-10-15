@@ -22,6 +22,8 @@ module(
     version = "0.0.1",
 )
 
+bazel_dep(name = "platforms", version = "1.1.0")
+
 # --- bazel-orfs pinned via submodule ---
 bazel_dep(name = "bazel-orfs")
 local_path_override(
@@ -74,7 +76,10 @@ archive_override(
         "curl -sSfL --retry 5 --retry-all-errors --retry-delay 5 -o .openroad-submodule-src-sta-8572175ac45c42ce8d3d772f73bbb059786b9c66.tar.gz https://github.com/The-OpenROAD-Project/OpenSTA/archive/8572175ac45c42ce8d3d772f73bbb059786b9c66.tar.gz && echo '805fbf8fef8ff35bc03e1d7fc3eb15760f886a4735e9c96adec303904b5d7d3e  .openroad-submodule-src-sta-8572175ac45c42ce8d3d772f73bbb059786b9c66.tar.gz' | sha256sum -c - && tar xzf .openroad-submodule-src-sta-8572175ac45c42ce8d3d772f73bbb059786b9c66.tar.gz --strip-components=1 -C src/sta && rm .openroad-submodule-src-sta-8572175ac45c42ce8d3d772f73bbb059786b9c66.tar.gz",
         "curl -sSfL --retry 5 --retry-all-errors --retry-delay 5 -o .openroad-submodule-third-party-abc-d527cfab4ad731b767ea0a2be2021d920d3afece.tar.gz https://github.com/The-OpenROAD-Project/abc/archive/d527cfab4ad731b767ea0a2be2021d920d3afece.tar.gz && echo '0cbf538e60d0303d0e00360d8973aaad7dae198954bed6e34cc31c9a13b3f802  .openroad-submodule-third-party-abc-d527cfab4ad731b767ea0a2be2021d920d3afece.tar.gz' | sha256sum -c - && tar xzf .openroad-submodule-third-party-abc-d527cfab4ad731b767ea0a2be2021d920d3afece.tar.gz --strip-components=1 -C third-party/abc && rm .openroad-submodule-third-party-abc-d527cfab4ad731b767ea0a2be2021d920d3afece.tar.gz",
         "curl -sSfL --retry 5 --retry-all-errors --retry-delay 5 -o .openroad-submodule-third-party-slang-elab-82effc8d9541be69e1ed3ec44759a4449f5d9247.tar.gz https://github.com/povik/yosys-slang/archive/82effc8d9541be69e1ed3ec44759a4449f5d9247.tar.gz && echo 'ea31b4a205ebb1fe5ec3789bcd66f21f4975e73c0901622af667f843b833ff10  .openroad-submodule-third-party-slang-elab-82effc8d9541be69e1ed3ec44759a4449f5d9247.tar.gz' | sha256sum -c - && tar xzf .openroad-submodule-third-party-slang-elab-82effc8d9541be69e1ed3ec44759a4449f5d9247.tar.gz --strip-components=1 -C third-party/slang-elab && rm .openroad-submodule-third-party-slang-elab-82effc8d9541be69e1ed3ec44759a4449f5d9247.tar.gz",
-        "sed -i 's|\"@slang\"|\"@sv-lang//:libsvlang\"|' third-party/slang-elab/src/BUILD",
+        "sed -i.bak 's|\"@slang\"|\"@sv-lang//:libsvlang\"|' third-party/slang-elab/src/BUILD && rm third-party/slang-elab/src/BUILD.bak",
+        # OpenSTA's standalone binary must use the system allocator on macOS,
+        # matching OpenROAD's platform selection (TCMalloc is Linux-only).
+        "sed -i.bak 's|malloc = \"@tcmalloc//tcmalloc\",|malloc = select({\"@platforms//os:linux\": \"@tcmalloc//tcmalloc\", \"@platforms//os:macos\": \"@bazel_tools//tools/cpp:malloc\"}),|' src/sta/BUILD && rm src/sta/BUILD.bak",
     ],
     strip_prefix = "OpenROAD-b65c274cadefe2151aa7eee32e1be9026e8ff14a",
     urls = ["https://github.com/The-OpenROAD-Project/OpenROAD/archive/b65c274cadefe2151aa7eee32e1be9026e8ff14a.tar.gz"],
@@ -96,6 +101,14 @@ single_version_override(
     version = "1.89.0.bcr.2",
 )
 
+# Darwin provides _Unwind_Backtrace without the glibc feature macro.
+single_version_override(
+    module_name = "boost.stacktrace",
+    patch_strip = 1,
+    patches = ["//patches:boost-stacktrace-darwin-unwind.patch"],
+    version = "1.89.0.bcr.2",
+)
+
 # scip 9.2.3 vendors a tinycthread that collides with glibc 2.41+'s
 # <threads.h>.  9.2.3.bcr.1 carries the upstream rename fix (fork registry).
 single_version_override(
@@ -108,7 +121,7 @@ single_version_override(
 single_version_override(
     module_name = "sed",
     patch_cmds = [
-        "sed -i 's|^#ifdef _LIBC$|#if 1|' lib/memchr.c",
+        "sed -i.bak 's|^#ifdef _LIBC$|#if 1|' lib/memchr.c && rm lib/memchr.c.bak",
     ],
     version = "4.9.bcr.5",
 )
@@ -124,6 +137,8 @@ bazel_dep(name = "qt-bazel")
 git_override(
     module_name = "qt-bazel",
     commit = "886104974c2fd72439f2c33b5deebf0fe4649df7",
+    patch_strip = 1,
+    patches = ["//patches:qt-macos-offscreen.patch"],
     remote = "https://github.com/The-OpenROAD-Project/qt_bazel_prebuilts",
 )
 
@@ -640,8 +655,8 @@ http_archive(
     patch_cmds = [
         "find . -name BUILD -empty -delete",
         "find . -name BUILD.bazel -empty -delete",
-        """sed -i 's|addResource("ClockGate.sv")|addResource("hdl/verilog/ClockGate.sv")|' hdl/chisel/src/coralnpu/ClockGate.scala""",
-        """sed -i 's|addResource("RstSync.sv")|addResource("hdl/verilog/RstSync.sv")|' hdl/chisel/src/coralnpu/RstSync.scala""",
+        """sed -i.bak 's|addResource("ClockGate.sv")|addResource("hdl/verilog/ClockGate.sv")|' hdl/chisel/src/coralnpu/ClockGate.scala && rm hdl/chisel/src/coralnpu/ClockGate.scala.bak""",
+        """sed -i.bak 's|addResource("RstSync.sv")|addResource("hdl/verilog/RstSync.sv")|' hdl/chisel/src/coralnpu/RstSync.scala && rm hdl/chisel/src/coralnpu/RstSync.scala.bak""",
     ],
     patches = [
         "//designs/src/coralnpu/chisel:patches/chisel7-compat.patch",
