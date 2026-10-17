@@ -10,7 +10,7 @@ build:macos --copt=-mmacosx-version-min=11.0 --host_copt=-mmacosx-version-min=11
 build:macos --linkopt=-mmacosx-version-min=11.0 --host_linkopt=-mmacosx-version-min=11.0
 
 # Build OpenROAD from source with the GUI enabled (needed by the _gallery
-# image render, which runs `openroad -gui` under xvfb).  bazel-orfs carried
+# image render, which runs `openroad -gui` with Qt offscreen). bazel-orfs carried
 # this in its own .bazelrc until 553c1c3 dropped it; declare it here so the
 # gallery targets keep working across submodule bumps.
 build --@openroad//:platform=gui
