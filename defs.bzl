@@ -13,7 +13,7 @@ PDKS = {
 def _gallery_image(name, src):
     """Render a final-stage screenshot from a routed ODB.
 
-    Produces <name>.png via xvfb-run + OpenROAD GUI.
+    Produces <name>.png via the OpenROAD GUI's offscreen Qt platform.
     """
     orfs_run(
         name = name,
@@ -23,7 +23,7 @@ def _gallery_image(name, src):
             "GALLERY_IMAGE": "$(location :" + name + ".png)",
             "OR_ARGS": "-gui",
         },
-        extra_args = "OPENROAD_CMD='xvfb-run -a $(OPENROAD_EXE) -exit $(OPENROAD_ARGS)'",
+        extra_args = "OPENROAD_CMD='QT_QPA_PLATFORM=offscreen $(OPENROAD_EXE) -exit $(OPENROAD_ARGS)'",
         script = "//tools/gallery:final_image.tcl",
     )
 

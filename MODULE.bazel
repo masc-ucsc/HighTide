@@ -109,10 +109,13 @@ single_version_override(
     version = "1.89.0.bcr.2",
 )
 
-# scip 9.2.3 vendors a tinycthread that collides with glibc 2.41+'s
-# <threads.h>.  9.2.3.bcr.1 carries the upstream rename fix (fork registry).
+# SCIP's vendored tinycthread once_flag/call_once macros collide with
+# glibc 2.43's <stdlib.h>. Apply upstream cc917e07 explicitly: the BCR
+# 9.2.3.bcr.1 release does not carry the fork registry's compatibility fix.
 single_version_override(
     module_name = "scip",
+    patch_strip = 1,
+    patches = ["//patches:scip-tinycthread-glibc.patch"],
     version = "9.2.3.bcr.1",
 )
 
@@ -137,8 +140,17 @@ bazel_dep(name = "qt-bazel")
 git_override(
     module_name = "qt-bazel",
     commit = "886104974c2fd72439f2c33b5deebf0fe4649df7",
+    # Root-only overrides must mirror bazel-orfs: build xcb-util-cursor
+    # from source so OpenROAD doesn't require host libxcb-cursor0.
+    # Try both release mirrors and verify the source archive.
+    patch_cmds = [
+        "(curl -sSfL --connect-timeout 15 --max-time 60 --retry 2 --retry-all-errors --retry-delay 5 -o xcb-util-cursor-0.1.5.tar.xz https://www.x.org/releases/individual/lib/xcb-util-cursor-0.1.5.tar.xz || curl -sSfL --connect-timeout 15 --max-time 60 --retry 2 --retry-all-errors --retry-delay 5 -o xcb-util-cursor-0.1.5.tar.xz https://www.mirrorservice.org/sites/ftp.x.org/pub/individual/lib/xcb-util-cursor-0.1.5.tar.xz) && echo '0caf99b0d60970f81ce41c7ba694e5eaaf833227bb2cbcdb2f6dc9666a663c57  xcb-util-cursor-0.1.5.tar.xz' | sha256sum -c - && tar xJf xcb-util-cursor-0.1.5.tar.xz --strip-components=1 -C interface_libs/xcb xcb-util-cursor-0.1.5/cursor && rm xcb-util-cursor-0.1.5.tar.xz",
+    ],
     patch_strip = 1,
-    patches = ["//patches:qt-macos-offscreen.patch"],
+    patches = [
+        "//patches:qt-macos-offscreen.patch",
+        "//patches:qt-bazel-xcb-cursor-from-source.patch",
+    ],
     remote = "https://github.com/The-OpenROAD-Project/qt_bazel_prebuilts",
 )
 
@@ -158,12 +170,33 @@ single_version_override(
 # --- LLVM toolchain (OpenROAD needs C++20 / libc++) ---
 bazel_dep(name = "toolchains_llvm", version = "1.5.0")
 
+# Mirror bazel-orfs's libxml2 stub so LLVM's linker runs without the host's
+# legacy libxml2.so.2 ABI. Bootstrap with the system BFD linker, then rebuild
+# with the pinned LLD for reproducible final bytes: LLD cannot bootstrap its
+# own missing runtime dependency. See bazel-orfs/tools/xml-hack/README.md.
+http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+
+http_archive(
+    name = "llvm_toolchain_llvm",
+    build_file = "@bazel-orfs//tools/xml-hack:BUILD.llvm_repo",
+    patch_cmds = [
+        """printf '%s\\n' 'extern void abort(void);' 'void *xmlFree=0;' 'void *xmlAddChild(void*p,void*c){abort();}' 'void *xmlCopyNamespace(void*n){abort();}' 'void xmlDocDumpFormatMemoryEnc(void*d,void*b,void*s,const char*e,int f){abort();}' 'void *xmlDocGetRootElement(void*d){abort();}' 'void *xmlDocSetRootElement(void*d,void*r){abort();}' 'void xmlFreeDoc(void*d){abort();}' 'void xmlFreeNode(void*n){abort();}' 'void xmlFreeNs(void*n){abort();}' 'void *xmlNewDoc(const void*v){abort();}' 'void *xmlNewNs(void*n,const void*h,const void*p){abort();}' 'void *xmlNewProp(void*n,const void*a,const void*v){abort();}' 'void *xmlReadMemory(const char*b,int sz,const char*u,const char*e,int o){abort();}' 'void xmlSetGenericErrorFunc(void*c,void*h){abort();}' 'void *xmlStrdup(const void*s){abort();}' 'void xmlUnlinkNode(void*n){abort();}' > _stub.c && printf '%s\\n' 'LIBXML2_2.4.30 { global: xmlAddChild; xmlCopyNamespace; xmlDocDumpFormatMemoryEnc; xmlDocGetRootElement; xmlDocSetRootElement; xmlFree; xmlFreeDoc; xmlFreeNode; xmlFreeNs; xmlNewDoc; xmlNewNs; xmlNewProp; xmlSetGenericErrorFunc; xmlStrdup; xmlUnlinkNode; local: *; };' 'LIBXML2_2.6.0 { global: xmlReadMemory; } LIBXML2_2.4.30;' > _stub.ver && ./bin/clang -nostdlib -nostdinc -fuse-ld=bfd -shared -o lib/libxml2.so.2 -Wl,--version-script=_stub.ver -Wl,-soname,libxml2.so.2 _stub.c && ./bin/clang -nostdlib -nostdinc -fuse-ld=lld -shared -o lib/libxml2.so.2.tmp -Wl,--version-script=_stub.ver -Wl,-soname,libxml2.so.2 _stub.c && mv lib/libxml2.so.2.tmp lib/libxml2.so.2 && rm _stub.c _stub.ver""",
+    ],
+    sha256 = "1ead36b3dfcb774b57be530df42bec70ab2d239fbce9889447c7a29a4ddc1ae6",
+    strip_prefix = "LLVM-20.1.8-Linux-X64",
+    url = "https://github.com/llvm/llvm-project/releases/download/llvmorg-20.1.8/LLVM-20.1.8-Linux-X64.tar.xz",
+)
+
 llvm = use_extension(
     "@toolchains_llvm//toolchain/extensions:llvm.bzl",
     "llvm",
 )
 llvm.toolchain(
     llvm_version = "20.1.8",
+)
+llvm.toolchain_root(
+    name = "llvm_toolchain",
+    label = "@llvm_toolchain_llvm//:BUILD.bazel",
 )
 use_repo(llvm, "llvm_toolchain")
 
@@ -200,7 +233,6 @@ orfs.default(
 # Caveat: GitHub /archive/<sha>.tar.gz gzip is not guaranteed byte-stable;
 # if a fetch ever fails on integrity, re-pin the sha256 (same failure mode
 # and fix as the OpenROAD submodule tarballs pinned above).
-http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 
 # lfsr — alexforencich/verilog-lfsr (plain Verilog, no generator/patch)
 http_archive(

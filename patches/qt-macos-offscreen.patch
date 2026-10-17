@@ -1,0 +1,10 @@
+--- a/build_defs.bzl
++++ b/build_defs.bzl
+@@ -255,6 +255,7 @@
+         ],
+         "@platforms//os:osx": [
+             "@qt-bazel//qt_source:cocoa_integration_plugin",
++            "@qt-bazel//qt_source:offscreen_plugin",
+         ],
+         "//conditions:default": [],
+     })
