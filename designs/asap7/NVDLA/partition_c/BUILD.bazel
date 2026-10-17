@@ -13,7 +13,9 @@ hightide_design(
     stage_data = {"synth": ["//designs/src/NVDLA:include"]},
     arguments = {
         "SYNTH_HIERARCHICAL": "1",
-        "VERILOG_INCLUDE_DIRS": "bazel-out/k8-fastbuild/bin/designs/src/NVDLA/vmod/include bazel-out/k8-fastbuild/bin/designs/src/NVDLA/vmod/vlibs",
+        # Derive generated include paths from the declared headers so this
+        # works for every Bazel platform/configuration, including macOS opt.
+        "VERILOG_INCLUDE_DIRS": "$(sort $(dir $(locations //designs/src/NVDLA:include)))",
         "CORE_UTILIZATION": "30",
         "PLACE_DENSITY_LB_ADDON": "0.30",
         "MACRO_PLACE_HALO": "5 5",

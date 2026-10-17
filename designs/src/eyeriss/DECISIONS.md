@@ -5,6 +5,57 @@ See `CLAUDE.md` (root) for the canonical upstream-bug index.
 
 Macro-heavy (GLB iact/Psum SRAM spads). Uses RTLMP for macro placement.
 
+## 2026-10 SRAM depth-banking correction
+
+The committed macro names retain aggregate depth, but their LEF/LIB interfaces
+represent one physical bank. The old common wrappers instantiated one cell and
+connected the full logical address. Yosys silently resized these ports, dropping
+bank-select bits and aliasing logical addresses. Old PPA results below predate this
+correction and must be regenerated before comparisons of the intended capacity.
+
+`dev/generate_rtl.py` now expands `dev/macros_template.v` using each platform's
+existing FakeRAM cfg. Each write/read enable selects its physical bank. The read
+bank is registered on the read clock to align with synchronous macro outputs;
+1rw writes hold the selected read bank. No extra read cycle, forwarding, reset
+implementation or same-address read/write policy is introduced. Reset pins remain
+unused as before; macro collision semantics require a functional contract or
+avoidance by the caller.
+
+The unused upstream `SCNN_shape_info_compiler` is an unfinished reference helper:
+`layer0_flag` through `layer4_flag` and `psum_acc_times` are undeclared. A declared
+archive patch fixes its trailing port-list comma and empty `else if()` stub, then
+wraps that module in `` `ifndef SYNTHESIS `` so it is removed before
+synthesis parsing. No declarations, drivers, or functional behavior are invented.
+The LiveHD baseline defines `SYNTHESIS=1` and uses
+`--ignore-uninstantiated-modules` explicitly for HighTide.
+
+The three platform BUILD files select `:rtl_asap7`, `:rtl_nangate45` or
+`:rtl_sky130hd`; the original `:rtl` / `:gen_eyeriss` names retain ASAP7 compatibility.
+RTL assembly is now portable to macOS as well as Linux (no GNU-only `sed -i`).
+The unchanged 193 logical memories expand to 1040 physical banks on ASAP7,
+308 on Nangate45 and 532 on Sky130HD. No flow knobs were retuned.
+
+Validation: all three RTL assembly targets build. The reproducible check below
+passes all 21 wrapper/platform cases: LEF/Liberty address widths and physical macro
+counts, no Yosys port resizing, and simulation over every logical address with
+independent write/read clocks, cross-bank access, read latency and held read output.
+The synchronous CE-controlled behavioral models exclude simultaneous same-address
+read/write and do not establish an unspecified physical macro collision policy.
+
+A full LiveHD Slang/ABC synthesis-only check also preserves all 1040 ASAP7
+physical SRAM cells. Independent Yosys elaboration of that emitted netlist finds
+no native arrays or unmapped cells after assignment/constant-wiring cleanup.
+This does not establish full-design equivalence, timing or placement; mixed
+SRAM/standard-cell timing units still need validation before that comparison.
+
+```
+python3 designs/src/eyeriss/dev/check_wrappers.py \
+  --iverilog /path/to/iverilog --vvp /path/to/vvp --yosys /path/to/yosys
+bazel build //designs/src/eyeriss:gen_eyeriss \
+  //designs/src/eyeriss:gen_eyeriss_nangate45 \
+  //designs/src/eyeriss:gen_eyeriss_sky130hd
+```
+
 ## Active workarounds (all platforms)
 
 - **`SKIP_INCREMENTAL_REPAIR` + `SKIP_LAST_GASP`** — post-GRT `repair_timing` makes only
