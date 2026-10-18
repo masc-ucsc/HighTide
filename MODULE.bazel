@@ -68,6 +68,12 @@ archive_override(
 bazel_dep(name = "openroad")
 archive_override(
     module_name = "openroad",
+    patch_strip = 1,
+    patches = [
+        "//patches:openroad-dpl-offrow-macro-padding.patch",
+        "//patches:openroad-rsz-port-buffer-cost.patch",
+        "//patches:openroad-est-stream-invalidation.patch",
+    ],
     integrity = "sha256-011veekekQGPjuDtDyxBsYmW7JkC6T2PqNhlCK7hCDk=",
     # GitHub /archive/<sha>.tar.gz tarballs don't carry submodules,
     # so vendor src/sta (OpenSTA) and third-party/abc from their own
@@ -187,6 +193,14 @@ http_archive(
     url = "https://github.com/llvm/llvm-project/releases/download/llvmorg-20.1.8/LLVM-20.1.8-Linux-X64.tar.xz",
 )
 
+# The Linux libxml2 bootstrap above cannot run on an ARM Mac. Use the
+# platform-selected LLVM distribution there; keep Linux's pinned bootstrap.
+native_llvm_archive = use_repo_rule("@toolchains_llvm//toolchain:rules.bzl", "llvm")
+native_llvm_archive(
+    name = "llvm_toolchain_native",
+    llvm_versions = {"": "20.1.8"},
+)
+
 llvm = use_extension(
     "@toolchains_llvm//toolchain/extensions:llvm.bzl",
     "llvm",
@@ -197,6 +211,11 @@ llvm.toolchain(
 llvm.toolchain_root(
     name = "llvm_toolchain",
     label = "@llvm_toolchain_llvm//:BUILD.bazel",
+)
+llvm.toolchain_root(
+    name = "llvm_toolchain",
+    targets = ["darwin-aarch64"],
+    label = "@llvm_toolchain_native//:BUILD.bazel",
 )
 use_repo(llvm, "llvm_toolchain")
 

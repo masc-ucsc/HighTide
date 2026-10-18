@@ -136,6 +136,8 @@ This cannot modify flow Tcl scripts (`FLOW_HOME` is pinned) — use the
 
 ## Documentation
 
+- **[LiveHD comparison guide](vslivehd.md)** — matched inputs, resynthesis-off controls, pre-CTS metrics, and CTS/route handoff
+
 - **[Quick Start Guide](docs/quickstart.md)** — install, build, and view results
 - **[Design Catalog](docs/designs.md)** — all designs, platforms, variants, and complexity
 - **[Architecture](docs/architecture.md)** — build system, flow stages, RTL management, caching
