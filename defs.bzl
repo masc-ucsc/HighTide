@@ -84,6 +84,21 @@ def hightide_design(name, platform, verilog_files, top = None, arguments = {}, s
         flow_kwargs["top"] = top
     flow_kwargs.update(kwargs)
 
+    # genMetrics.py reads 5_1_grt.log in addition to the stage JSON/reports.
+    # bazel-orfs deliberately excludes earlier logs from normal stage inputs
+    # to avoid read-only log/write collisions. Add this log only to metadata,
+    # which reads it without overwriting it; preserve per-design stage data.
+    metadata_grt_logs = name + "_metadata_grt_logs"
+    native.filegroup(
+        name = metadata_grt_logs,
+        srcs = [":" + name + "_grt"],
+        output_group = "logs",
+        tags = ["manual"],
+    )
+    stage_data = dict(flow_kwargs.get("stage_data", {}))
+    stage_data["generate_metadata"] = stage_data.get("generate_metadata", []) + [":" + metadata_grt_logs]
+    flow_kwargs["stage_data"] = stage_data
+
     orfs_flow(**flow_kwargs)
 
     _gallery_image(

@@ -22,6 +22,25 @@ hightide_design(
         "SDC_FILE": [":constraint.sdc"],
         "ADDITIONAL_LEFS": [":sram_lefs"],
         "ADDITIONAL_LIBS": [":sram_libs"],
+    } | {
+        hook: [":timing.tcl"]
+        for hook in [
+            "PRE_FLOORPLAN_TCL",
+            "PRE_MACRO_PLACE_TCL",
+            "PRE_TAPCELL_TCL",
+            "PRE_PDN_TCL",
+            "PRE_GLOBAL_PLACE_SKIP_IO_TCL",
+            "PRE_IO_PLACEMENT_TCL",
+            "PRE_GLOBAL_PLACE_TCL",
+            "PRE_RESIZE_TCL",
+            "PRE_DETAIL_PLACE_TCL",
+            "PRE_CTS_TCL",
+            "PRE_GLOBAL_ROUTE_TCL",
+            "PRE_DETAIL_ROUTE_TCL",
+            "PRE_FILLCELL_TCL",
+            "PRE_DENSITY_FILL_TCL",
+            "PRE_FINAL_REPORT_TCL",
+        ]
     },
     arguments = {
         "SYNTH_HIERARCHICAL": "1",

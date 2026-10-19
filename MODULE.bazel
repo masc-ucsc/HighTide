@@ -797,7 +797,10 @@ http_archive(
     name = "eyeriss_src",
     build_file = "//designs/src/eyeriss:external.BUILD.bazel",
     patch_args = ["-p1"],
-    patches = ["//patches:eyeriss-shape-compiler-synthesis.patch"],
+    patches = [
+        "//patches:eyeriss-shape-compiler-synthesis.patch",
+        "//patches:eyeriss-psum-router-width.patch",
+    ],
     sha256 = "0a32ef13dbc82d7cc33ca070b6b085bfce3e6e65d6c11c288ab39552ea136174",
     strip_prefix = "CNN-Accelerator-Based-on-Eyeriss-v2-dc1df8bffa3c7a8b091f23fe66155a032496315e",
     urls = ["https://github.com/BoooC/CNN-Accelerator-Based-on-Eyeriss-v2/archive/dc1df8bffa3c7a8b091f23fe66155a032496315e.tar.gz"],
