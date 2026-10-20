@@ -24,15 +24,25 @@ if {[file extension $input] eq ".odb"} {
   if {[info exists ::env(ADDITIONAL_LEFS)]} {
     foreach lef $::env(ADDITIONAL_LEFS) {read_lef $lef}
   }
-  read_def $input
+  if {[file extension $input] eq ".v"} {
+    read_verilog $input
+    link_design $::env(SCORE_TOP)
+  } else {
+    read_def $input
+  }
 }
 set_cmd_units -time ps -capacitance fF -resistance kOhm -power mW -distance um
 read_sdc $::env(SDC_FILE)
 source $::env(SET_RC_TCL)
-estimate_parasitics -placement
+set stage place
+if {[info exists ::env(SCORE_STAGE)]} {set stage $::env(SCORE_STAGE)}
+if {$stage ne "synth"} {
+  estimate_parasitics -placement
+}
 set block [ord::get_db_block]
 set out $::env(SCORE_OUT)
 file mkdir $out
+if {$stage ne "synth"} {check_placement -verbose}
 
 set units [$block getDbUnitsPerMicron]
 set hpwl 0.0;set measured 0

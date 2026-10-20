@@ -178,3 +178,12 @@ result. Keep measurements in the run's HTML/data artifacts, outside this skill.
   [connectivity export](tools/vslivehd/audit.tcl): check their metric definitions
   and supported stages before adapting them. Add preparation, validation and
   downstream resume scripts for the chosen experiment when needed.
+- [Suite measurement tools](tools/vslivehd/BUILD.bazel),
+  [freezer](tools/vslivehd/freeze_tools.py), and
+  [resource wrapper](tools/vslivehd/measure.py) support
+  [lhdsuite's ASAP7 comparison](../lhdsuite/bench/placement.py). The wrapper
+  records `perf stat`, CPU, largest-process RSS, sampled process-group RSS and
+  explicit guard stops. Freeze the optimized binaries before the sweep.
+  `score_flow.tcl` accepts `SCORE_STAGE=synth|place`; synthesis uses zero
+  wire RC and placement uses estimated RC with ideal clocks.
+  Run scoring outside the measured synthesis/physical interval.
