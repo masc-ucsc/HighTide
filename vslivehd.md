@@ -178,12 +178,21 @@ result. Keep measurements in the run's HTML/data artifacts, outside this skill.
   [connectivity export](tools/vslivehd/audit.tcl): check their metric definitions
   and supported stages before adapting them. Add preparation, validation and
   downstream resume scripts for the chosen experiment when needed.
-- [Suite measurement tools](tools/vslivehd/BUILD.bazel),
+- [Measurement tools](tools/vslivehd/BUILD.bazel),
   [freezer](tools/vslivehd/freeze_tools.py), and
   [resource wrapper](tools/vslivehd/measure.py) support
-  [lhdsuite's ASAP7 comparison](../lhdsuite/bench/placement.py). The wrapper
+  [lhdtrack's corpus ASAP7 pre-CTS comparison](../lhdtrack/tools/run_placement.py)
+  and the earlier [lhdsuite diagnostic](../lhdsuite/bench/placement.py). The wrapper
   records `perf stat`, CPU, largest-process RSS, sampled process-group RSS and
   explicit guard stops. Freeze the optimized binaries before the sweep.
   `score_flow.tcl` accepts `SCORE_STAGE=synth|place`; synthesis uses zero
   wire RC and placement uses estimated RC with ideal clocks.
   Run scoring outside the measured synthesis/physical interval.
+- [lhdtrack SRAM preparation](../lhdtrack/src/lhdtrack/srams.py) uses this checkout's
+  pinned `tools/bsg_fakeram` generator for declared explicit SRAMs. It stages the
+  generator, validates write-data pin directions, uses camel-case site-grid snap
+  keys, and converts ns/pF Liberty timing/capacitance/energy units before merging
+  with ASAP7. Both tools receive the same models. The
+  [integration check](../lhdtrack/tools/check_placement_srams.py) runs both pre-CTS
+  flows and checks original versus converted models on one DEF. Inferred arrays
+  retain their original semantics and the compiler's default realization policy.
