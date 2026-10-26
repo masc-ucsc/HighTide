@@ -268,6 +268,21 @@ def rudy(view, sizes, bin_um=1.08, max_bins=512):
             'definition': 'harness RUDY: (w+h)/(w*h) over cell-center pin bboxes, x M2 pitch 36 nm; IO pins skipped'}
 
 
+REGISTER = re.compile(r'^(DFF|DHL|DLL|SDF|ASYNC|ICG)')
+
+
+def master_counts(view, view_mod):
+    """Cells per master (every master, most used first) and registers: Liberty flip-flops/latches
+    plus domino instances (each owns one converted state's storage)."""
+    counts = {}
+    for c in view.components.values():
+        counts[c.macro] = counts.get(c.macro, 0) + 1
+    ordered = dict(sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
+    flops = sum(n for m, n in counts.items() if REGISTER.match(m))
+    domino = sum(n for m, n in counts.items() if m.startswith(view_mod.DOMINO_PREFIX))
+    return {'by_master': ordered, 'registers': {'cmos': flops, 'domino': domino, 'total': flops + domino}}
+
+
 def rail_templates(view, view_mod):
     """Domino instances per PG rail template (t0 on N starts, t1 on FS starts) and how many sit
     on a start row whose orientation needs the other template (bundle schema 4)."""
@@ -314,6 +329,7 @@ def leg_metrics(rundir, arm, lib, arms_mod, view_mod):
         view = view_mod.read_def(def_dir / 'out.def')
         m['rudy'] = rudy(view, view_mod.lef_sizes(lefs))
         m['rail_templates'] = rail_templates(view, view_mod)
+        m['masters'] = master_counts(view, view_mod)
         m['core_die_um'] = dict(zip(('core', 'die'), arms_mod.fixed_core(view, lefs)))
     return m
 
