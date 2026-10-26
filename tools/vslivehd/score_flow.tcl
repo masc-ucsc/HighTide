@@ -13,6 +13,8 @@
 #   TECH_LEF SC_LEF  technology and standard-cell LEF (DEF input only)
 #   ADDITIONAL_LEFS  space-separated macro LEFs (DEF input only; may be empty)
 #   SET_RC_TCL       platform setRC.tcl (layer/wire RC)
+#   SCORE_CHECK_PLACEMENT  optional: "report" records a failed check_placement in
+#                    score.json (placement_check) instead of stopping; default stops
 set begin [clock milliseconds]
 foreach lib $::env(LIB_FILES) {read_liberty $lib}
 set input $::env(SCORE_INPUT)
@@ -42,7 +44,15 @@ if {$stage ne "synth"} {
 set block [ord::get_db_block]
 set out $::env(SCORE_OUT)
 file mkdir $out
-if {$stage ne "synth"} {check_placement -verbose}
+set placement_check skipped
+if {$stage ne "synth"} {
+  if {[info exists ::env(SCORE_CHECK_PLACEMENT)] && $::env(SCORE_CHECK_PLACEMENT) eq "report"} {
+    set placement_check [expr {[catch {check_placement -verbose}] ? "failed" : "pass"}]
+  } else {
+    check_placement -verbose
+    set placement_check pass
+  }
+}
 
 set units [$block getDbUnitsPerMicron]
 set hpwl 0.0;set measured 0
@@ -76,10 +86,10 @@ report_checks -path_delay max -group_path_count 10 -fields {slew cap input net f
 report_checks -path_delay min -group_path_count 3 -fields {slew cap input net fanout} -digits 6 -format full_clock_expanded > $out/hold_paths.rpt
 set rect [$block getDieArea];set core [$block getCoreArea]
 set f [open $out/score.json w]
-puts $f [format { {"hpwl_um":%.9f,"measured_nets":%d,"setup_wns_ps":%.9f,"setup_tns_ps":%.9f,"hold_wns_ps":%.9f,"hold_tns_ps":%.9f,"instances":%d,"logical_cells":%d,"physical_cells":%d,"macros":%d,"instance_area_um2":%.9f,"macro_area_um2":%.9f,"die_um":[%.6f,%.6f,%.6f,%.6f],"core_um":[%.6f,%.6f,%.6f,%.6f],"scoring_seconds":%.6f} } \
+puts $f [format { {"hpwl_um":%.9f,"measured_nets":%d,"setup_wns_ps":%.9f,"setup_tns_ps":%.9f,"hold_wns_ps":%.9f,"hold_tns_ps":%.9f,"instances":%d,"logical_cells":%d,"physical_cells":%d,"macros":%d,"instance_area_um2":%.9f,"macro_area_um2":%.9f,"die_um":[%.6f,%.6f,%.6f,%.6f],"core_um":[%.6f,%.6f,%.6f,%.6f],"scoring_seconds":%.6f,"placement_check":"%s"} } \
  $hpwl $measured [sta::worst_slack -max] [sta::total_negative_slack -max] [sta::worst_slack -min] [sta::total_negative_slack -min] \
  [llength [$block getInsts]] $logical $physical $macros $area $macro_area \
  [expr {double([$rect xMin])/$units}] [expr {double([$rect yMin])/$units}] [expr {double([$rect xMax])/$units}] [expr {double([$rect yMax])/$units}] \
  [expr {double([$core xMin])/$units}] [expr {double([$core yMin])/$units}] [expr {double([$core xMax])/$units}] [expr {double([$core yMax])/$units}] \
- [expr {([clock milliseconds]-$begin)/1000.0}]]
+ [expr {([clock milliseconds]-$begin)/1000.0}] $placement_check]
 close $f
