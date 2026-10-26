@@ -268,6 +268,22 @@ def rudy(view, sizes, bin_um=1.08, max_bins=512):
             'definition': 'harness RUDY: (w+h)/(w*h) over cell-center pin bboxes, x M2 pitch 36 nm; IO pins skipped'}
 
 
+def rail_templates(view, view_mod):
+    """Domino instances per PG rail template (t0 on N starts, t1 on FS starts) and how many sit
+    on a start row whose orientation needs the other template (bundle schema 4)."""
+    counts, mismatched = {}, 0
+    for c in view.components.values():
+        if not c.macro.startswith(view_mod.DOMINO_PREFIX):
+            continue
+        t = c.macro.rpartition('_')[2]
+        counts[t] = counts.get(t, 0) + 1
+        if hasattr(view_mod, 'rail_template') and not c.macro.startswith(view_mod.rail_template(c.macro, view.rows[c.y])):
+            mismatched += 1
+    if not counts:
+        return None
+    return {'by_template': counts, 'parity_mismatched': mismatched if hasattr(view_mod, 'rail_template') else None}
+
+
 def clock_summary(stage):
     acc = stage.get('clock_accounting') or {}
     clocks = {}
@@ -297,6 +313,7 @@ def leg_metrics(rundir, arm, lib, arms_mod, view_mod):
         lefs = [def_dir / x for x in json.loads((def_dir / 'lefs.json').read_text())]
         view = view_mod.read_def(def_dir / 'out.def')
         m['rudy'] = rudy(view, view_mod.lef_sizes(lefs))
+        m['rail_templates'] = rail_templates(view, view_mod)
         m['core_die_um'] = dict(zip(('core', 'die'), arms_mod.fixed_core(view, lefs)))
     return m
 
@@ -405,11 +422,18 @@ def run_design(a, key, out_root, manifest):
         r = L.run_variant(d, name, sets, threads=1, timeout=a.timeout, mem_gib=a.mem_gib, rundir=rundir,
                           log=out_root / 'results.jsonl',
                           timing_unmeasured='provisional domino cells have no Liberty timing' if arm == 3 else None,
-                          check_placement='report')
+                          check_placement=a.check_placement)
         meta = r['meta']
         run_json = rundir / 'lhd.run.json'
         guard_meta = json.loads(run_json.read_text()) if run_json.is_file() else {}
         status, result = classify(rundir, meta['status'], arms_mod)
+        score_log = rundir / 'score/score.log'
+        check = (r.get('score') or {}).get('placement_check')
+        if check is None and score_log.is_file():  # strict scoring stops at a failed check_placement
+            log_text = score_log.read_text()
+            check = 'failed: %s' % '; '.join(re.findall(r'\[(?:WARNING|ERROR) DPL-\d+\][^\n]*', log_text)) \
+                if 'DPL-0033' in log_text else None
+        row['opensta_check_placement'] = check
         row.update(lhd_wall_s=meta.get('lhd_seconds'), peak_rss_mib=guard_meta.get('tree_peak_mib'),
                    lhd_status=meta['status'], opensta=r.get('score'), opensta_timing=r.get('timing'),
                    opensta_penalty=r.get('penalty'))
@@ -476,8 +500,8 @@ def new_manifest(a, cmdline):
                   'core modes: area (ORFS utilization), fixed (frame of the arm-1 area-driven DEF: die, rows, FIXED IO '
                   'pins), orfs (frame of the OpenROAD 3_place.odb: die, rows, FIXED IO pins; tap cells dropped); each '
                   'mode is its own table',
-                  'OpenSTA scoring runs check_placement in report mode (score.placement_check); LiveHD legality is '
-                  'qor.place.legal',
+                  'OpenSTA scoring runs check_placement (--check-placement: strict stops the score of an illegal DEF, '
+                  'report records it); opensta_check_placement holds the verdict, qor.place.legal is LiveHD legality',
                   'RUDY is the harness estimate (LiveHD final RUDY, plan H3, is not implemented)',
                   'pass.abc.drop_init/derived_clock (lhdsweep base sets) apply only to ABC (arm 1)'],
         'designs': {},
@@ -502,7 +526,7 @@ def tsv_row(e):
               (e.get('multirow') or {}).get('cells'), eco.get('displaced_cells'), stage.get('status'), stage.get('period_ps'),
               stage.get('limiting'), stage.get('c_clk_ff'), sum(c['sinks'] for c in clocks.values()) if clocks else None,
               e.get('hpwl_um'), score.get('hpwl_um'), rd.get('peak'), rd.get('mean'), score.get('setup_wns_ps'),
-              score.get('setup_tns_ps'), score.get('logical_cells'), score.get('placement_check'),
+              score.get('setup_tns_ps'), score.get('logical_cells'), e.get('opensta_check_placement'),
               ((e.get('error') or {}).get('message') if isinstance(e.get('error'), dict) else e.get('error'))]
     return '\t'.join('' if v is None else '%.4f' % v if isinstance(v, float) else str(v).replace('\t', ' ') for v in values)
 
@@ -530,7 +554,7 @@ def report(out_root):
                 L.fmt(r.get('lhd_wall_s'), 8, 1), L.fmt((r.get('peak_rss_mib') or 0) / 1024, 6, 2),
                 L.fmt(area.get('liberty_um2'), 10, 1), L.fmt(area.get('lef_um2'), 10, 1), L.fmt(stage.get('period_ps'), 9, 1),
                 stage.get('status', '-'), '%s/%s' % (cov.get('converted', '-'), cov.get('eligible', '-')),
-                (r.get('opensta') or {}).get('placement_check', '-')))
+                (r.get('opensta_check_placement') or '-')[:7]))
 
 
 # ---------------------------------------------------------------------- cli
@@ -551,6 +575,9 @@ def main():
     p.add_argument('--sdc', choices=('flattened', 'constraint'), default='flattened',
                    help='synth.sdc of every arm: the reference 3_place.sdc (literal, IO delays readable by '
                         'LiveHD) or the ORFS constraint.sdc (Tcl variables: clock only, IO cut)')
+    p.add_argument('--check-placement', choices=('strict', 'report'), default='strict',
+                   help="OpenROAD check_placement in scoring: strict stops the score of an illegal DEF (the "
+                        "sweep's default); report records it and scores anyway")
     p.add_argument('--seed', type=int, default=1)
     p.add_argument('--iterations', type=int, default=1500)
     p.add_argument('--grid-density', type=int, default=64)
