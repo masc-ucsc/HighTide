@@ -364,10 +364,20 @@ def run_design(a, key, out_root, manifest):
     out = out_root / d.safe
     out.mkdir(parents=True, exist_ok=True)
     legs = plan(a, port)
+    synth_sdc = sdc
+    if a.sdc == 'flattened':
+        # The OpenSTA-written SDC of the reference (3_place.sdc): the same clocks and IO delays as
+        # constraint.sdc with Tcl variables resolved, which LiveHD's SDC reader (and so the stage
+        # timer's input/output delays) can read. OpenSTA scoring already uses it.
+        synth_sdc = L.adapt_sdc(d.ref_dir / '3_place.sdc', out / 'synth.sdc')
+        if sdc_clock_port(synth_sdc) != [port]:
+            raise SystemExit('domplace.py: %s: 3_place.sdc clocks %s' % (key, sdc_clock_port(synth_sdc)))
+        legs = [(n, arm, c, dict(sets, **{'synth.sdc': str(synth_sdc)})) for n, arm, c, sets in legs]
     lib = L.merged_liberty(d)
     entry = {'design': key, 'top': d.name, 'domino_clock': port, 'clock_period_ps': L.clock_period(sdc),
              'utilization': a.utilization or d.utilization(), 'density': d.density(), 'merged_liberty': str(lib),
-             'merged_liberty_sha256': sha256(lib), 'sdc_sha256': sha256(sdc),
+             'merged_liberty_sha256': sha256(lib), 'sdc_sha256': sha256(sdc), 'synth_sdc': str(synth_sdc),
+             'synth_sdc_sha256': sha256(synth_sdc),
              'legs': [{'leg': n, 'arm': arm, 'arm_name': ARMS[arm][0], 'core': c, 'sets': s} for n, arm, c, s in legs]}
     manifest['designs'][key] = entry
     write_manifest(out_root, manifest)
@@ -538,6 +548,9 @@ def main():
                    help='comma list of area, fixed (arm-1 area-driven frame: die, rows, IO), orfs (OpenROAD 3_place '
                         'frame); both = area,fixed; all = area,fixed,orfs')
     p.add_argument('--utilization', help='override the ORFS CORE_UTILIZATION for the area-driven legs')
+    p.add_argument('--sdc', choices=('flattened', 'constraint'), default='flattened',
+                   help='synth.sdc of every arm: the reference 3_place.sdc (literal, IO delays readable by '
+                        'LiveHD) or the ORFS constraint.sdc (Tcl variables: clock only, IO cut)')
     p.add_argument('--seed', type=int, default=1)
     p.add_argument('--iterations', type=int, default=1500)
     p.add_argument('--grid-density', type=int, default=64)
