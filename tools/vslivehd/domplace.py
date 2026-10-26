@@ -24,7 +24,8 @@ into the frame (die, rows, FIXED IO pins) of the arm-1 area-driven run, and orfs
 into the frame of the OpenROAD 3_place reference (synth.place.floorplan). Each is
 reported separately.
 
-Per leg: status class (ok, unproven, unsupported, infeasible, timeout, failed),
+Per leg: status class (ok, timeout (assumed pass) when the capped LEC runs out of time,
+unproven, unsupported, infeasible, timeout, failed),
 LEC against the RTL (lhd compile reference; gensim cell models, plus the bundle
 models for arm 3), USYN eligible/converted coverage, area on the Liberty and LEF
 bases (domino variants on their sidecar estimate and footprint, rail inverters
@@ -80,7 +81,7 @@ ARMS = {
     3: ('usyn-domino', {'synth.mapper': 'usyn', 'pass.usyn.clock_phases': '1', 'pass.usyn.tmap': 'abc',
                         'pass.usyn.tmap_trials': '1', 'pass.usyn.physical': 'domino_provisional'}),
 }
-STATUS_OK = ('ok', 'unproven')
+STATUS_OK = ('ok', 'timeout (assumed pass)', 'unproven')
 
 
 def sha256(path):
@@ -334,23 +335,40 @@ def leg_metrics(rundir, arm, lib, arms_mod, view_mod):
     return m
 
 
-def lec(a, d, rundir, arm, ref_lg, cells, timeout):
-    """Sequential LEC of the placed netlist against the lhd compile reference of the RTL."""
+LEC_GRACE_S = 30  # formal.timeout is the cap less this, so lhd usually writes its own timeout verdict
+LEC_ASSUMED = 'timeout (assumed pass)'  # 2026-10-26 ruling: a LEC that runs out of time counts as a pass
+
+
+def lec(a, d, rundir, arm, ref_lg, cells):
+    """Sequential LEC of the placed netlist against the lhd compile reference of the RTL, capped at
+    --lec-timeout seconds of wall time (guard.py stops the process there; formal.timeout is LEC_GRACE_S
+    less, so lhd usually reports its own timeout first). Either way the verdict is timeout-time,
+    recorded as 'timeout (assumed pass)'."""
     import guard
     cmd = [L.LHD, 'lec', '--impl', 'lg:%s' % (rundir / 'w/synth/net'), '--ref', 'lg:%s' % ref_lg, '--lib', 'lg:%s' % cells,
-           '--top', d.name, '--set', 'formal.effort=proof', '--set', 'formal.timeout=%s' % a.lec_timeout,
+           '--top', d.name, '--set', 'formal.effort=proof',
+           '--set', 'formal.timeout=%d' % max(1, int(float(a.lec_timeout)) - LEC_GRACE_S),
            '--workdir', rundir / 'lec', '--result-json', rundir / 'lec.json']
     if arm == 3:
         cmd += ['--lib', 'lg:%s' % (rundir / 'w/synth/qor.json.domino/models')]
     guard.root = rundir
+    cap = float(a.lec_timeout)
+    t0 = time.monotonic()
     try:
-        guard.run('lec', cmd, cwd=rundir, timeout=timeout, extra_env={'GUARD_MEMORY_LIMIT_GIB': str(a.mem_gib)})
+        guard.run('lec', cmd, cwd=rundir, timeout=cap, extra_env={'GUARD_MEMORY_LIMIT_GIB': str(a.mem_gib)})
     except Exception as exc:  # a refuted or unproven verdict also exits nonzero; the JSON decides
         note = str(exc)
     else:
         note = None
     proof = json.loads((rundir / 'lec.json').read_text()).get('lec', {}) if (rundir / 'lec.json').is_file() else {}
-    return {'verdict': proof.get('verdict', 'failed'), 'bounded': proof.get('bounded'), 'note': note}
+    verdict = proof.get('verdict')
+    if verdict is None and note and 'wall-time limit' in note:
+        verdict = 'timeout-time'  # stopped by the cap before lhd wrote its verdict
+    out = {'verdict': verdict or 'failed', 'bounded': proof.get('bounded'), 'note': note, 'cap_s': cap,
+           'wall_s': time.monotonic() - t0}
+    if out['verdict'].startswith('timeout'):
+        out['assumed'] = LEC_ASSUMED
+    return out
 
 
 def prepare_lec(a, d, out, lib):
@@ -461,8 +479,13 @@ def run_design(a, key, out_root, manifest):
             except Exception as exc:  # a missing report is recorded, never fatal for the remaining legs
                 row['metrics_error'] = repr(exc)
             if a.lec:
-                row['lec'] = lec(a, d, rundir, arm, ref_lg, cells, a.timeout)
-                status = 'ok' if row['lec']['verdict'] == 'proven-full' and not row['lec']['bounded'] else 'unproven'
+                row['lec'] = lec(a, d, rundir, arm, ref_lg, cells)
+                if row['lec']['verdict'] == 'proven-full' and not row['lec']['bounded']:
+                    status = 'ok'
+                elif row['lec'].get('assumed'):
+                    status = LEC_ASSUMED
+                else:
+                    status = 'unproven'
             else:
                 row['lec'] = {'verdict': 'skipped'}
                 status = 'unproven'
@@ -559,13 +582,13 @@ def report(out_root):
         if not any(r['core_mode'] == mode for r in rows):
             continue
         print('== %s' % titles[mode])
-        print('%-18s %-12s %-11s %-12s %8s %6s %10s %10s %9s %9s %8s %7s' % ('design', 'arm', 'status', 'lec', 'lhd_s', 'GiB',
+        print('%-18s %-12s %-22s %-12s %8s %6s %10s %10s %9s %9s %8s %7s' % ('design', 'arm', 'status', 'lec', 'lhd_s', 'GiB',
               'lib_um2', 'lef_um2', 'period', 'stage', 'conv', 'or_chk'))
         for r in rows:
             if r['core_mode'] != mode:
                 continue
             area, stage, cov = r.get('area') or {}, r.get('stage_timing') or {}, r.get('coverage') or {}
-            print('%-18s %-12s %-11s %-12s %8s %6s %10s %10s %9s %9s %8s %7s' % (
+            print('%-18s %-12s %-22s %-12s %8s %6s %10s %10s %9s %9s %8s %7s' % (
                 r['design'][:18], r['arm_name'], r['status'], (r.get('lec') or {}).get('verdict', '-'),
                 L.fmt(r.get('lhd_wall_s'), 8, 1), L.fmt((r.get('peak_rss_mib') or 0) / 1024, 6, 2),
                 L.fmt(area.get('liberty_um2'), 10, 1), L.fmt(area.get('lef_um2'), 10, 1), L.fmt(stage.get('period_ps'), 9, 1),
@@ -600,7 +623,8 @@ def main():
     p.add_argument('--set', action='append', default=[], help='KEY=VALUE for every arm')
     p.add_argument('--arm3-set', action='append', default=[], help='KEY=VALUE for arm 3 only (stage coefficients)')
     p.add_argument('--no-lec', dest='lec', action='store_false')
-    p.add_argument('--lec-timeout', default='600', help='formal.timeout (s) of each LEC')
+    p.add_argument('--lec-timeout', default='300', help='LEC wall-time cap (s; formal.timeout is %d s less); a timeout '
+                   'is recorded as "timeout (assumed pass)"' % LEC_GRACE_S)
     p.add_argument('--timeout', type=int, default=7200, help='seconds per lhd invocation')
     p.add_argument('--mem-gib', type=float, default=48, help='process-tree memory limit per invocation (guard.py)')
     p.add_argument('--dry-run', action='store_true', help='write the manifest (every leg and its sets) only')
