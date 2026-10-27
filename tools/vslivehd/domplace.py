@@ -61,12 +61,15 @@ import lhdsweep as L  # noqa: E402
 # Per-design clock port of the ORFS SDC (`create_clock ... [get_ports P]`). The
 # ORFS SDCs name the port through Tcl variables, which LiveHD's SDC reader does
 # not resolve, so the stage timer and USYN's domino_clock take it from here.
-# sdc_clock_port() re-derives it at run time and a mismatch is an error.
+# sdc_clock_port() re-derives it at run time and a mismatch is an error. A multi-clock
+# SDC names the domino clock here; the other clocks stay CMOS-only (the stage timer
+# and the domino conversion see only this one).
 DOMINO_CLOCK = {
     'lfsr': 'clk',
     'sha3': 'clock',
     'minimax': 'clk',
     'NVDLA/partition_m': 'nvdla_core_clk',
+    'NVDLA/partition_o': 'nvdla_core_clk',  # two clocks: nvdla_core_clk 2000 ps (domino) + nvdla_falcon_clk 2500 ps
     'litedram': 'clk',
 }
 # The H list, smallest first: asap7, no macros, an OpenROAD 3_place reference,
@@ -324,6 +327,10 @@ def leg_metrics(rundir, arm, lib, arms_mod, view_mod):
         stage = json.loads(stage_file.read_text())
         m['stage_timing']['coverage'] = stage.get('coverage')
         m['stage_timing']['clock'] = clock_summary(stage)
+    place_qor = rundir / 'w/synth/place/qor.json'
+    if place_qor.is_file():
+        q = json.loads(place_qor.read_text())
+        m['gp'] = {'converged': q.get('gp_converged'), 'overflow': q.get('gp_overflow')}
     def_dir = rundir / 'def'
     if (def_dir / 'out.def').is_file():
         lefs = [def_dir / x for x in json.loads((def_dir / 'lefs.json').read_text())]
@@ -410,7 +417,7 @@ def run_design(a, key, out_root, manifest):
     if not port:
         raise SystemExit('domplace.py: %s has no domino_clock entry' % key)
     found = sdc_clock_port(sdc)
-    if found != [port]:
+    if port not in found:
         raise SystemExit('domplace.py: %s: table clock %s, SDC clocks %s' % (key, port, found))
     out = out_root / d.safe
     out.mkdir(parents=True, exist_ok=True)
@@ -421,11 +428,11 @@ def run_design(a, key, out_root, manifest):
         # constraint.sdc with Tcl variables resolved, which LiveHD's SDC reader (and so the stage
         # timer's input/output delays) can read. OpenSTA scoring already uses it.
         synth_sdc = L.adapt_sdc(d.ref_dir / '3_place.sdc', out / 'synth.sdc')
-        if sdc_clock_port(synth_sdc) != [port]:
+        if port not in sdc_clock_port(synth_sdc):
             raise SystemExit('domplace.py: %s: 3_place.sdc clocks %s' % (key, sdc_clock_port(synth_sdc)))
         legs = [(n, arm, c, dict(sets, **{'synth.sdc': str(synth_sdc)})) for n, arm, c, sets in legs]
     lib = L.merged_liberty(d)
-    entry = {'design': key, 'top': d.name, 'domino_clock': port, 'clock_period_ps': L.clock_period(sdc),
+    entry = {'design': key, 'top': d.name, 'domino_clock': port, 'sdc_clocks': found, 'clock_period_ps': L.clock_period(sdc),
              'utilization': a.utilization or d.utilization(), 'density': d.density(), 'merged_liberty': str(lib),
              'merged_liberty_sha256': sha256(lib), 'sdc_sha256': sha256(sdc), 'synth_sdc': str(synth_sdc),
              'synth_sdc_sha256': sha256(synth_sdc),
@@ -551,7 +558,31 @@ def new_manifest(a, cmdline):
 TSV = ['design', 'core_mode', 'leg', 'arm_name', 'status', 'lec', 'lhd_wall_s', 'peak_rss_mib', 'eligible', 'converted',
        'liberty_um2', 'lef_um2', 'domino_lef_um2', 'domino_instances', 'cells', 'legal', 'multirow_cells', 'eco_displaced',
        'stage_status', 'period_ps', 'limiting', 'c_clk_ff', 'clock_sinks', 'hpwl_um', 'opensta_hpwl_um', 'rudy_peak',
-       'rudy_mean', 'opensta_wns_ps', 'opensta_tns_ps', 'logical_cells', 'opensta_check_placement', 'error']
+       'rudy_mean', 'opensta_wns_ps', 'opensta_tns_ps', 'logical_cells', 'opensta_check_placement', 'error',
+       'reg2reg_period_ps', 'reg2reg_class', 'reg2reg_worst', 'limiting_class', 'max_slew_violations',
+       'max_cap_violations', 'max_fanout_violations', 'gp_converged', 'gp_overflow', 'selection_reasons']
+# Stage-timing endpoints that are storage (flip-flops, domino states) or clock-gate enables;
+# the register-to-register period is the worst class whose launch and capture are both storage.
+STORAGE = ('flop', 'domino', 'latch', 'gate')
+
+
+def reg2reg(stage):
+    """(period_ps, 'launch->capture', worst endpoint) of the worst storage-to-storage class."""
+    best = None
+    for c in stage.get('classes') or []:
+        if c.get('launch') in STORAGE and c.get('capture') in STORAGE and c.get('period_ps') is not None:
+            if best is None or c['period_ps'] > best['period_ps']:
+                best = c
+    return (best['period_ps'], '%s->%s' % (best['launch'], best['capture']), best.get('worst')) if best else (None, None, None)
+
+
+def limiting_class(stage):
+    """The launch->capture class whose period is the stage period."""
+    classes = [c for c in stage.get('classes') or [] if c.get('period_ps') is not None]
+    if not classes:
+        return None
+    c = max(classes, key=lambda c: c['period_ps'])
+    return '%s->%s' % (c['launch'], c['capture'])
 
 
 def tsv_row(e):
@@ -566,7 +597,10 @@ def tsv_row(e):
               stage.get('limiting'), stage.get('c_clk_ff'), sum(c['sinks'] for c in clocks.values()) if clocks else None,
               e.get('hpwl_um'), score.get('hpwl_um'), rd.get('peak'), rd.get('mean'), score.get('setup_wns_ps'),
               score.get('setup_tns_ps'), score.get('logical_cells'), e.get('opensta_check_placement'),
-              ((e.get('error') or {}).get('message') if isinstance(e.get('error'), dict) else e.get('error'))]
+              ((e.get('error') or {}).get('message') if isinstance(e.get('error'), dict) else e.get('error')),
+              *reg2reg(stage), limiting_class(stage), score.get('max_slew_violations'), score.get('max_cap_violations'),
+              score.get('max_fanout_violations'), (e.get('gp') or {}).get('converged'), (e.get('gp') or {}).get('overflow'),
+              ','.join('%s=%s' % kv for kv in sorted((cov.get('reasons') or {}).items(), key=lambda kv: -kv[1])) or None]
     return '\t'.join('' if v is None else '%.4f' % v if isinstance(v, float) else str(v).replace('\t', ' ') for v in values)
 
 
