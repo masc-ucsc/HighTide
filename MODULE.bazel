@@ -469,6 +469,9 @@ http_archive(
     strip_prefix = "scm-1976c7efb4979271eee2abe262fde0f9a20e2557",
     urls = ["https://github.com/pulp-platform/scm/archive/1976c7efb4979271eee2abe262fde0f9a20e2557.tar.gz"],
 )
+    # Break the alu_result -> misaligned exception -> is_acc_inst -> is_fp_inst -> opa/opb combinational loop.
+    patch_args = ["-p1"],
+    patches = ["//patches:snitch-cluster-fp-inst-comb-loop.patch"],
 
 # --- NNgen CNN accelerator generator ---
 # examples/cnn/cnn.py builds a small quantized CNN and emits the accelerator

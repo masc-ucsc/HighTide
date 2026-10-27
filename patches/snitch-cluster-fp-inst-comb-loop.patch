@@ -1,0 +1,30 @@
+--- a/hw/snitch/src/snitch.sv
++++ b/hw/snitch/src/snitch.sv
+@@ -252,6 +252,10 @@
+   // Classify instructions
+   logic        is_fp_inst;
+   logic        is_acc_inst;
++  // Decoder result before the exception sanitisation below. is_fp_inst uses it so that the datapath
++  // (alu_result -> misaligned exception -> is_acc_inst -> is_fp_inst -> rs*_is_f2i -> opa/opb -> alu_result)
++  // has no combinational loop.
++  logic        is_acc_inst_pre;
+ 
+   // Load/Store Defines
+   logic is_load, is_store, is_signed;
+@@ -3001,6 +3005,7 @@
+       end
+     endcase
+ 
++    is_acc_inst_pre = is_acc_inst;
+     // Sanitize illegal instructions so that they don't exert any side-effects.
+     if (exception) begin
+      write_rd = 1'b0;
+@@ -3445,7 +3450,7 @@
+   assign en_copift_o = csr_copift_q;
+ 
+   // Is an instruction a FP instruction (i.e. an instruction executed in the FPSS)
+-  assign is_fp_inst = is_acc_inst && (acc_req_o.q.addr == FP_SS);
++  assign is_fp_inst = is_acc_inst_pre && (acc_req_o.q.addr == FP_SS);
+ 
+   // Read from F2I if rs==x31, queues are enabled and the instruction is an integer
+   // instruction (not a FP instruction).
