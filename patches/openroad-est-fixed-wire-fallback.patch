@@ -1,0 +1,74 @@
+diff --git a/src/est/src/EstimateParasitics.cpp b/src/est/src/EstimateParasitics.cpp
+--- a/src/est/src/EstimateParasitics.cpp
++++ b/src/est/src/EstimateParasitics.cpp
+@@ -29,6 +29,7 @@
+ #include "odb/dbSet.h"
+ #include "odb/dbShape.h"
+ #include "odb/dbTypes.h"
++#include "odb/dbWireCodec.h"
+ #include "odb/geom.h"
+ #include "sta/ArcDelayCalc.hh"
+ #include "sta/Graph.hh"
+@@ -64,6 +65,32 @@
+ using odb::dbModInst;
+ 
+ namespace {
++// Fixed routes have no global guides. Keep their placement estimate available
++// to intermediate timing repair; final OpenRCX extraction replaces this
++// approximation with the realized wire RC. Inspect encoded paths because
++// dbNet::getWireType() can still report ROUTED for FIXED DEF wiring.
++bool hasOnlyFixedWire(odb::dbNet* net)
++{
++  auto* wire = net->getWire();
++  if (wire == nullptr || net->isSpecial() || net->getSigType().isSupply()) {
++    return false;
++  }
++  bool found = false;
++  odb::dbWireDecoder decoder;
++  decoder.begin(wire);
++  for (auto opcode = decoder.next(); opcode != odb::dbWireDecoder::END_DECODE;
++       opcode = decoder.next()) {
++    if (opcode == odb::dbWireDecoder::PATH
++        || opcode == odb::dbWireDecoder::SHORT
++        || opcode == odb::dbWireDecoder::JUNCTION) {
++      if (decoder.getWireType() != odb::dbWireType::FIXED) {
++        return false;
++      }
++      found = true;
++    }
++  }
++  return found;
++}
+ // Invalidation is idempotent: it needs the connected endpoints, not the
+ // sorted/deduplicated PinSet built by connectedPinIterator on large nets.
+ class InvalidateConnectedDelays final : public sta::PinVisitor
+@@ -588,9 +615,16 @@
+   MakeWireParasitics builder(
+       logger_, this, sta_, db_->getTech(), block_, global_router_);
+ 
+-  for (auto& [db_net, route] : global_router_->getRoutes()) {
++  auto& routes = global_router_->getRoutes();
++  for (auto& [db_net, route] : routes) {
+     if (!route.empty()) {
+       builder.estimateParasitics(db_net, route, spef_writer);
++    }
++  }
++  for (auto* net : block_->getNets()) {
++    const auto route = routes.find(net);
++    if ((route == routes.end() || route->second.empty()) && hasOnlyFixedWire(net)) {
++      estimateWireParasitic(db_network_->dbToSta(net), spef_writer);
+     }
+   }
+ }
+@@ -601,7 +635,10 @@
+       logger_, this, sta_, db_->getTech(), block_, global_router_);
+   auto& routes = global_router_->getRoutes();
+   auto iter = routes.find(db_net);
+-  if (iter == routes.end()) {
++  if (iter == routes.end() || iter->second.empty()) {
++    if (hasOnlyFixedWire(db_net)) {
++      estimateWireParasitic(db_network_->dbToSta(db_net));
++    }
+     return;
+   }
+   grt::GRoute& route = iter->second;

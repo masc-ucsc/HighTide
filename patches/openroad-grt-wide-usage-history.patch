@@ -1,0 +1,260 @@
+diff --git a/src/grt/src/fastroute/include/DataType.h b/src/grt/src/fastroute/include/DataType.h
+--- a/src/grt/src/fastroute/include/DataType.h
++++ b/src/grt/src/fastroute/include/DataType.h
+@@ -135,15 +135,16 @@
+              // MazePoints
+ {
+   int16_t congCNT;
+-  uint16_t cap;    // the capacity of the edge
+-  uint16_t usage;  // the usage of the edge
++  uint16_t cap;   // the capacity of the edge
++  int32_t usage;  // includes artificial NDR penalties; keep capacity arithmetic
++                  // signed
+   uint16_t red;
+-  uint16_t real_cap;  // the real capacity without user adjustment
+-  int16_t last_usage;
++  uint16_t real_cap;      // the real capacity without user adjustment
++  int32_t last_usage;     // accumulated congestion history
+   uint16_t ndr_overflow;  // number of NDR nets in congestion
+   double est_usage;       // the estimated usage of the edge
+ 
+-  uint16_t usage_red() const { return usage + red; }
++  int32_t usage_red() const { return usage + red; }
+   double est_usage_red() const { return est_usage + red; }
+ };
+ 
+diff --git a/src/grt/src/fastroute/include/Graph2D.h b/src/grt/src/fastroute/include/Graph2D.h
+--- a/src/grt/src/fastroute/include/Graph2D.h
++++ b/src/grt/src/fastroute/include/Graph2D.h
+@@ -60,8 +60,8 @@
+   void clearUsed();
+   bool hasEdges() const;
+ 
+-  uint16_t getUsageH(int x, int y) const;
+-  uint16_t getUsageV(int x, int y) const;
++  int32_t getUsageH(int x, int y) const;
++  int32_t getUsageV(int x, int y) const;
+   int getNDROverflowH(int x, int y) const
+   {
+     return h_edges_[x][y].ndr_overflow;
+@@ -78,12 +78,12 @@
+                                       bool horizontal,
+                                       int limit,
+                                       int uniform_ndr_cost) const;
+-  int16_t getLastUsageH(int x, int y) const;
+-  int16_t getLastUsageV(int x, int y) const;
++  int32_t getLastUsageH(int x, int y) const;
++  int32_t getLastUsageV(int x, int y) const;
+   double getEstUsageH(int x, int y) const;
+   double getEstUsageV(int x, int y) const;
+-  uint16_t getUsageRedH(int x, int y) const;
+-  uint16_t getUsageRedV(int x, int y) const;
++  int32_t getUsageRedH(int x, int y) const;
++  int32_t getUsageRedV(int x, int y) const;
+   double getEstUsageRedH(int x, int y) const
+   {
+     return h_edges_[x][y].est_usage_red();
+diff --git a/src/grt/src/fastroute/src/graph2d.cpp b/src/grt/src/fastroute/src/graph2d.cpp
+--- a/src/grt/src/fastroute/src/graph2d.cpp
++++ b/src/grt/src/fastroute/src/graph2d.cpp
+@@ -8,6 +8,7 @@
+ #include <cstddef>
+ #include <cstdint>
+ #include <functional>
++#include <limits>
+ #include <set>
+ #include <string>
+ #include <utility>
+@@ -156,12 +157,12 @@
+   return !h_edges_.empty() && !v_edges_.empty();
+ }
+ 
+-uint16_t Graph2D::getUsageH(const int x, const int y) const
++int32_t Graph2D::getUsageH(const int x, const int y) const
+ {
+   return h_edges_[x][y].usage;
+ }
+ 
+-uint16_t Graph2D::getUsageV(const int x, const int y) const
++int32_t Graph2D::getUsageV(const int x, const int y) const
+ {
+   return v_edges_[x][y].usage;
+ }
+@@ -173,6 +174,9 @@
+                                              int uniform_ndr_cost) const
+ {
+   const auto& edge = horizontal ? h_edges_[x][y] : v_edges_[x][y];
++  if (edge.usage < 0) {
++    return false;
++  }
+   if (edge.usage <= limit) {
+     return true;
+   }
+@@ -194,12 +198,12 @@
+   return demand >= 0 && demand <= limit;
+ }
+ 
+-int16_t Graph2D::getLastUsageH(int x, int y) const
++int32_t Graph2D::getLastUsageH(int x, int y) const
+ {
+   return h_edges_[x][y].last_usage;
+ }
+ 
+-int16_t Graph2D::getLastUsageV(int x, int y) const
++int32_t Graph2D::getLastUsageV(int x, int y) const
+ {
+   return v_edges_[x][y].last_usage;
+ }
+@@ -214,12 +218,12 @@
+   return v_edges_[x][y].est_usage;
+ }
+ 
+-uint16_t Graph2D::getUsageRedH(const int x, const int y) const
++int32_t Graph2D::getUsageRedH(const int x, const int y) const
+ {
+   return h_edges_[x][y].usage_red();
+ }
+ 
+-uint16_t Graph2D::getUsageRedV(const int x, const int y) const
++int32_t Graph2D::getUsageRedV(const int x, const int y) const
+ {
+   return v_edges_[x][y].usage_red();
+ }
+@@ -457,6 +461,15 @@
+  * round : the number of maze route stages runned
+  */
+ 
++// History is a routing heuristic, so saturate at its representation limits
++// instead of wrapping a heavily congested edge into a cheap/negative history.
++static int32_t boundedHistory(int64_t history)
++{
++  return std::clamp<int64_t>(history,
++                             std::numeric_limits<int32_t>::min(),
++                             std::numeric_limits<int32_t>::max());
++}
++
+ // Updates the congestion history of edges.
+ void Graph2D::updateCongestionHistory(const int up_type,
+                                       const int ahth,
+@@ -474,7 +487,8 @@
+       const int overflow = edges[x][y].usage - edges[x][y].cap;
+       if (overflow > 0) {
+         edges[x][y].congCNT++;
+-        edges[x][y].last_usage += overflow;
++        edges[x][y].last_usage
++            = boundedHistory(int64_t(edges[x][y].last_usage) + overflow);
+       } else if (!stop_decreasing) {
+         if (up_type != 1) {
+           edges[x][y].congCNT = std::max<int>(0, edges[x][y].congCNT - 1);
+@@ -482,8 +496,8 @@
+         if (up_type != 3) {
+           edges[x][y].last_usage *= 0.9;
+         } else {
+-          edges[x][y].last_usage
+-              = std::max<int>(edges[x][y].last_usage + overflow, 0);
++          edges[x][y].last_usage = boundedHistory(
++              std::max<int64_t>(int64_t(edges[x][y].last_usage) + overflow, 0));
+         }
+       }
+       maxlimit = std::max<int>(maxlimit, edges[x][y].last_usage);
+@@ -502,7 +516,8 @@
+   foreachEdge([rnd](Edge& edge) {
+     const int overflow = edge.usage - edge.cap;
+     if (overflow > 0 || edge.congCNT > rnd) {
+-      edge.last_usage += edge.congCNT * overflow / 2;
++      edge.last_usage = boundedHistory(int64_t(edge.last_usage)
++                                       + int64_t(edge.congCNT) * overflow / 2);
+     }
+   });
+ }
+diff --git a/src/grt/src/fastroute/src/utility.cpp b/src/grt/src/fastroute/src/utility.cpp
+--- a/src/grt/src/fastroute/src/utility.cpp
++++ b/src/grt/src/fastroute/src/utility.cpp
+@@ -2079,8 +2079,9 @@
+ 
+   // check horizontal edges
+   for (const auto& [x, y] : graph2d_.getUsedGridsH()) {
+-    if (graph2d_.getUsageH(x, y) > max_h_edge_usage
+-        && !within_limit(x, y, true, max_h_edge_usage)) {
++    if (graph2d_.getUsageH(x, y) < 0
++        || (graph2d_.getUsageH(x, y) > max_h_edge_usage
++            && !within_limit(x, y, true, max_h_edge_usage))) {
+       report_crossings(x, y, true);
+       logger_->error(GRT,
+                      228,
+@@ -2095,8 +2096,9 @@
+ 
+   // check vertical edges
+   for (const auto& [x, y] : graph2d_.getUsedGridsV()) {
+-    if (graph2d_.getUsageV(x, y) > max_v_edge_usage
+-        && !within_limit(x, y, false, max_v_edge_usage)) {
++    if (graph2d_.getUsageV(x, y) < 0
++        || (graph2d_.getUsageV(x, y) > max_v_edge_usage
++            && !within_limit(x, y, false, max_v_edge_usage))) {
+       report_crossings(x, y, false);
+       logger_->error(GRT,
+                      229,
+diff --git a/src/grt/test/ndr_usage_guard_test.cpp b/src/grt/test/ndr_usage_guard_test.cpp
+--- a/src/grt/test/ndr_usage_guard_test.cpp
++++ b/src/grt/test/ndr_usage_guard_test.cpp
+@@ -1,5 +1,6 @@
+ // SPDX-License-Identifier: BSD-3-Clause
+ #include <array>
++#include <limits>
+ #include <string>
+ 
+ #include "Graph2D.h"
+@@ -98,4 +99,53 @@
+   graph.updateUsageH(0, 0, &nets[16], 4);
+   EXPECT_FALSE(graph.usageWithinLimitWithUniformNDR(0, 0, true, 3300, 3));
+ }
++TEST_F(NDRUsageGuard, HeavyNDRUsageAndHistoryDoNotWrap)
++{
++  std::array<FrNet, 220> heavy;
++  graph.updateCap3D(1, 1, 0, EdgeDirection::Horizontal, 0);
++  graph.updateCap3D(1, 1, 0, EdgeDirection::Vertical, 0);
++  for (int i = 0; i < heavy.size(); ++i) {
++    auto* net
++        = odb::dbNet::create(block, ("heavy" + std::to_string(i)).c_str());
++    heavy[i].reset(net, true, 0, 3, 0, 0, 0, new std::vector<int8_t>{3});
++    graph.updateUsageH(1, 1, &heavy[i], 3);
++    graph.updateUsageV(1, 1, &heavy[i], 3);
++  }
++  EXPECT_EQ(graph.getUsageH(1, 1), 66000);
++  EXPECT_EQ(graph.getUsageV(1, 1), 66000);
++  EXPECT_LT(graph.getCapH(1, 1) - graph.getUsageH(1, 1), 0);
++  EXPECT_TRUE(graph.usageWithinLimitWithUniformNDR(1, 1, true, 660, 3));
++  EXPECT_FALSE(graph.usageWithinLimitWithUniformNDR(1, 1, true, 659, 3));
++  graph.addRedH(1, 1, 17);
++  EXPECT_EQ(graph.getUsageRedH(1, 1), 66017);
++  int max_adj = 0;
++  graph.InitLastUsage(1);
++  for (int round = 0; round < 30; ++round) {
++    graph.updateCongestionHistory(1, 0, false, max_adj);
++  }
++  EXPECT_EQ(graph.getLastUsageH(1, 1), 1980000);
++  EXPECT_EQ(graph.getLastUsageV(1, 1), 1980000);
++  EXPECT_EQ(max_adj, 1980000);
++  for (auto& net : heavy) {
++    graph.updateUsageH(1, 1, &net, -3);
++    graph.updateUsageV(1, 1, &net, -3);
++  }
++  EXPECT_EQ(graph.getUsageH(1, 1), 0);
++  EXPECT_EQ(graph.getNDROverflowH(1, 1), 0);
++}
++TEST_F(NDRUsageGuard, HistorySaturatesAndNegativeUsageFailsClosed)
++{
++  const int maximum = std::numeric_limits<int32_t>::max();
++  graph.addUsageH(1, 0, maximum - 100);
++  graph.InitLastUsage(1);
++  int max_adj = 0;
++  graph.updateCongestionHistory(1, 0, false, max_adj);
++  graph.updateCongestionHistory(1, 0, false, max_adj);
++  EXPECT_EQ(graph.getLastUsageH(1, 0), maximum);
++  graph.str_accu(0);
++  EXPECT_EQ(graph.getLastUsageH(1, 0), maximum);
++  graph.addUsageV(0, 1, -1);
++  EXPECT_EQ(graph.getUsageV(0, 1), -1);
++  EXPECT_FALSE(graph.usageWithinLimitWithUniformNDR(0, 1, false, 3300, 3));
++}
+ }  // namespace grt

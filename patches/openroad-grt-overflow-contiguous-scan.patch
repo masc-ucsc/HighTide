@@ -1,0 +1,38 @@
+diff --git a/src/grt/src/fastroute/src/maze.cpp b/src/grt/src/fastroute/src/maze.cpp
+--- a/src/grt/src/fastroute/src/maze.cpp
++++ b/src/grt/src/fastroute/src/maze.cpp
+@@ -2323,8 +2323,24 @@
+ 
+   int total_usage = 0;
+ 
++  // Used grids are ordered sets. Materialize their unchanged traversal once
++  // so every metal layer scans contiguous coordinates rather than walking
++  // the same tree again. Preserve set order for deterministic diagnostics.
++  const auto& used_h = graph2d_.getUsedGridsH();
++  const auto& used_v = graph2d_.getUsedGridsV();
++  std::vector<std::pair<int, int>> horizontal;
++  std::vector<std::pair<int, int>> vertical;
++  horizontal.reserve(used_h.size());
++  vertical.reserve(used_v.size());
++  for (const auto& grid : used_h) {
++    horizontal.push_back(grid);
++  }
++  for (const auto& grid : used_v) {
++    vertical.push_back(grid);
++  }
++
+   for (int k = 0; k < num_layers_; k++) {
+-    for (const auto& [x, y] : graph2d_.getUsedGridsH()) {
++    for (const auto& [x, y] : horizontal) {
+       total_usage += h_edges_3D_[k][y][x].usage;
+       overflow = h_edges_3D_[k][y][x].usage - h_edges_3D_[k][y][x].cap;
+ 
+@@ -2345,7 +2361,7 @@
+         max_H_overflow = std::max(max_H_overflow, overflow);
+       }
+     }
+-    for (const auto& [x, y] : graph2d_.getUsedGridsV()) {
++    for (const auto& [x, y] : vertical) {
+       total_usage += v_edges_3D_[k][y][x].usage;
+       overflow = v_edges_3D_[k][y][x].usage - v_edges_3D_[k][y][x].cap;
+       if (overflow > 0) {

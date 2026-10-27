@@ -1,0 +1,26 @@
+--- a/include/boost/context/detail/invoke.hpp
++++ b/include/boost/context/detail/invoke.hpp
+@@ -26,7 +26,11 @@
+ template< typename Fn, typename ... Args >
+ typename std::enable_if<
+     std::is_member_pointer< typename std::decay< Fn >::type >::value,
++#if __cplusplus >= 201703L
++    typename std::invoke_result< Fn &&, Args && ... >::type
++#else
+     typename std::result_of< Fn &&( Args && ... ) >::type
++#endif
+ >::type
+ invoke( Fn && fn, Args && ... args) {
+     return std::mem_fn( fn)( std::forward< Args >( args) ... );
+@@ -35,7 +39,11 @@
+ template< typename Fn, typename ... Args >
+ typename std::enable_if<
+     ! std::is_member_pointer< typename std::decay< Fn >::type >::value,
++#if __cplusplus >= 201703L
++    typename std::invoke_result< Fn &&, Args && ... >::type
++#else
+     typename std::result_of< Fn &&( Args && ... ) >::type
++#endif
+ >::type
+ invoke( Fn && fn, Args && ... args) {
+     return std::forward< Fn >( fn)( std::forward< Args >( args) ... );

@@ -1,0 +1,30 @@
+diff --git a/src/odb/src/swig/common/odb.i b/src/odb/src/swig/common/odb.i
+--- a/src/odb/src/swig/common/odb.i
++++ b/src/odb/src/swig/common/odb.i
+@@ -79,6 +79,9 @@
+ %ignore odb::dbObject::getImpl;
+ %ignore odb::dbObject::getType(const char*, utl::Logger*);
+ %include "odb/dbObject.h"
++// dbWire::getLength returns uint64_t, which otherwise becomes an opaque
++// pointer in Tcl. Use the numeric 64-bit typemap for this return value.
++%apply unsigned long long { uint64_t getLength };
+ %include "odb/db.h"
+ 
+ // Prevent compiler problems when including dbShape.h.
+diff --git a/src/drt/test/fixed_wire_short_via_escape.tcl b/src/drt/test/fixed_wire_short_via_escape.tcl
+--- a/src/drt/test/fixed_wire_short_via_escape.tcl
++++ b/src/drt/test/fixed_wire_short_via_escape.tcl
+@@ -3,6 +3,13 @@
+ read_lef "../../psm/test/asap7/asap7_tech_1x_201209.lef"
+ read_lef "fixed_wire_short_via_escape.lef"
+ read_def "fixed_wire_short_via_escape.def"
++# getLength must be a numeric 64-bit value, not a SWIG pointer token.
++foreach {name expected} {wired 20 left 38 right 38} {
++  set length [[[[ord::get_db_block] findNet $name] getWire] getLength]
++  if {![string is entier -strict $length] || $length != $expected} {
++    error "$name: expected $expected DBU, got $length"
++  }
++}
+ set_routing_layers -signal M2-M7
+ pin_access -min_access_points 10000 -via_in_pin_bottom_layer M1 -via_in_pin_top_layer M1
+ set points {}

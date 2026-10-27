@@ -1,0 +1,82 @@
+diff --git a/src/grt/src/GlobalRouter.cpp b/src/grt/src/GlobalRouter.cpp
+--- a/src/grt/src/GlobalRouter.cpp
++++ b/src/grt/src/GlobalRouter.cpp
+@@ -460,6 +460,31 @@
+       initCUGR(min_layer, max_layer);
+     } else {
+       initFastRoute(min_layer, max_layer);
++      // Reinitialization accounts for dbWires as obstructions, but clears
++      // FastRoute occupancy for guide-only nets in a partially routed design.
++      // Restore their resources and use the matching GRoute release path:
++      // the new FastRoute trees do not yet contain these routes.
++      std::vector<std::pair<odb::dbNet*, int>> ndr_nets;
++      for (const auto& [db_net, groute] : routes_) {
++        if (isDetailedRouted(db_net)) {
++          continue;
++        }
++        auto it = db_net_map_.find(db_net);
++        if (it == db_net_map_.end()) {
++          continue;
++        }
++        updateNetResources(it->second, false);
++        it->second->setAreSegmentsRestored(true);
++        if (db_net->getNonDefaultRule() != nullptr) {
++          int net_id;
++          bool exists;
++          fastroute_->getNetId(db_net, net_id, exists);
++          if (exists) {
++            ndr_nets.emplace_back(db_net, net_id);
++          }
++        }
++      }
++      disableCongestedNDRNetsFromRoutes(ndr_nets);
+     }
+   }
+   grouter_cbk_ = new GRouteDbCbk(this);
+diff --git a/src/grt/test/BUILD b/src/grt/test/BUILD
+--- a/src/grt/test/BUILD
++++ b/src/grt/test/BUILD
+@@ -213,3 +213,10 @@
+     ],
+     visibility = ["//visibility:public"],
+ )
++
++regression_test(
++    name = "incremental_pre_routed_usage",
++    check_log = False,
++    check_passfail = True,
++    data = [":test_resources", "pre_routed1.tcl"],
++)
+diff --git a/src/grt/test/incremental_pre_routed_usage.tcl b/src/grt/test/incremental_pre_routed_usage.tcl
+--- /dev/null
++++ b/src/grt/test/incremental_pre_routed_usage.tcl
+@@ -0,0 +1,29 @@
++# Mixed dbWire/global-guide occupancy must survive a no-op incremental route.
++source "pre_routed1.tcl"
++
++proc congestion_snapshot {} {
++  set grid [[ord::get_db_block] getGCellGrid]
++  set values {}
++  set nx [llength [$grid getGridX]]
++  set ny [llength [$grid getGridY]]
++  foreach layer [[ord::get_db_tech] getLayers] {
++    if {[$layer getRoutingLevel] == 0} { continue }
++    for {set x 0} {$x < $nx} {incr x} {
++      for {set y 0} {$y < $ny} {incr y} {
++        lappend values [$grid getUsage $layer $x $y]
++      }
++    }
++  }
++  return $values
++}
++
++set before [congestion_snapshot]
++for {set iteration 0} {$iteration < 2} {incr iteration} {
++  global_route -start_incremental
++  global_route -end_incremental
++  set after [congestion_snapshot]
++  check "mixed incremental iteration $iteration preserves every edge usage" {
++    expr {$before eq $after}
++  } 1
++}
++exit_summary

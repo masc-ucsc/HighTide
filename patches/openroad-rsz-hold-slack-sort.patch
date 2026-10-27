@@ -1,0 +1,33 @@
+--- a/src/rsz/src/RepairHold.cc
++++ b/src/rsz/src/RepairHold.cc
+@@ -497,9 +497,27 @@
+                                 int& pass)
+ {
+   estimate_parasitics_->updateParasitics();
+-  sta::sort(hold_failures, [=, this](sta::Vertex* end1, sta::Vertex* end2) {
+-    return sta_->slack(end1, min_) < sta_->slack(end2, min_);
+-  });
++  // Slack includes CRPR path traversal. Compute it once per endpoint, not
++  // repeatedly in the sort comparator. No timing edits occur during sorting;
++  // discard these keys before repairEndHold starts changing the design.
++  if (hold_failures.size() > 1) {
++    struct EndpointSlack
++    {
++      sta::Vertex* vertex;
++      sta::Slack slack;
++    };
++    std::vector<EndpointSlack> endpoint_slacks;
++    endpoint_slacks.reserve(hold_failures.size());
++    for (sta::Vertex* end : hold_failures) {
++      endpoint_slacks.push_back({end, sta_->slack(end, min_)});
++    }
++    sta::sort(endpoint_slacks, [](const auto& lhs, const auto& rhs) {
++      return lhs.slack < rhs.slack;
++    });
++    for (size_t i = 0; i < hold_failures.size(); ++i) {
++      hold_failures[i] = endpoint_slacks[i].vertex;
++    }
++  }
+   for (sta::Vertex* end_vertex : hold_failures) {
+     if (verbose) {
+       printProgress(pass, false, false);

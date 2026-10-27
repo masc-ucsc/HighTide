@@ -1,0 +1,44 @@
+diff --git a/src/cts/include/cts/TritonCTS.h b/src/cts/include/cts/TritonCTS.h
+--- a/src/cts/include/cts/TritonCTS.h
++++ b/src/cts/include/cts/TritonCTS.h
+@@ -116,7 +116,7 @@
+   void destroyClockModNet(sta::Pin* pin_driver);
+   void writeClockNetsToDb(TreeBuilder* builder,
+                           odb::PtrSet<odb::dbNet>& clkLeafNets);
+-  void writeClockNDRsToDb(TreeBuilder* builder);
++  void writeClockNDRsToDb(TreeBuilder* builder, int& ruleIndex);
+   void incrementNumClocks() { ++numberOfClocks_; }
+   void clearNumClocks() { numberOfClocks_ = 0; }
+   unsigned getNumClocks() const { return numberOfClocks_; }
+diff --git a/src/cts/src/TritonCTS.cpp b/src/cts/src/TritonCTS.cpp
+--- a/src/cts/src/TritonCTS.cpp
++++ b/src/cts/src/TritonCTS.cpp
+@@ -503,11 +503,15 @@
+ {
+   odb::PtrSet<odb::dbNet> clkLeafNets;
+   std::unordered_set<odb::dbInst*> clkDummies;
++  // No NDR is deleted in this loop. Each successful insertion fills the first
++  // available CTS_NDR slot, so later builders can resume at the next slot.
++  // Reset per invocation to preserve naming across repeated CTS runs.
++  int ruleIndex = 0;
+ 
+   for (auto& builder : builders_) {
+     writeClockNetsToDb(builder.get(), clkLeafNets);
+     if (options_->getApplyNdr() != CtsOptions::NdrStrategy::NONE) {
+-      writeClockNDRsToDb(builder.get());
++      writeClockNDRsToDb(builder.get(), ruleIndex);
+     }
+     if (options_->dummyLoadEnabled()) {
+       int nDummies = writeDummyLoadsToDb(builder->getClock(), clkDummies);
+@@ -1913,10 +1917,9 @@
+   return applyNDRToClockLevels(clockNet, clockNDR, firstHalfLevels);
+ }
+ 
+-void TritonCTS::writeClockNDRsToDb(TreeBuilder* builder)
++void TritonCTS::writeClockNDRsToDb(TreeBuilder* builder, int& ruleIndex)
+ {
+   char ruleName[64];
+-  int ruleIndex = 0;
+   odb::dbTechNonDefaultRule* clockNDR;
+   Clock& clockNet = builder->getClock();
+ 

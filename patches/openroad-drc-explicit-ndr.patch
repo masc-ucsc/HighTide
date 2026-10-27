@@ -1,0 +1,114 @@
+diff --git a/src/drt/include/drt/TritonRoute.h b/src/drt/include/drt/TritonRoute.h
+--- a/src/drt/include/drt/TritonRoute.h
++++ b/src/drt/include/drt/TritonRoute.h
+@@ -179,7 +179,8 @@
+                 int x2,
+                 int y2,
+                 const std::string& marker_name,
+-                int num_threads);
++                int num_threads,
++                bool check_ndr = false);
+   bool initGuide();
+   void prep();
+   odb::dbDatabase* getDb() const { return db_; }
+diff --git a/src/drt/src/TritonRoute.cpp b/src/drt/src/TritonRoute.cpp
+--- a/src/drt/src/TritonRoute.cpp
++++ b/src/drt/src/TritonRoute.cpp
+@@ -1245,7 +1245,8 @@
+                            int x2,
+                            int y2,
+                            const std::string& marker_name,
+-                           int num_threads)
++                           int num_threads,
++                           bool check_ndr)
+ {
+   // Independent DRC must inspect current OpenDB wires, not the retained
+   // router geometry. Preserve the live PA/DR design and its configuration,
+@@ -1263,6 +1264,11 @@
+     }
+   };
+   auto check_cfg = std::make_unique<RouterConfiguration>(*router_cfg_);
++  // NDR spacing is optional in standalone GC when auto tapering is enabled.
++  // An explicit check must inspect it without changing the live router mode.
++  if (check_ndr) {
++    check_cfg->AUTO_TAPER_NDR_NETS = false;
++  }
+   auto check_design = std::make_unique<frDesign>(logger_, check_cfg.get());
+   CheckDesignScope scope{
+       design_, router_cfg_, std::move(check_cfg), std::move(check_design)};
+diff --git a/src/drt/src/TritonRoute.i b/src/drt/src/TritonRoute.i
+--- a/src/drt/src/TritonRoute.i
++++ b/src/drt/src/TritonRoute.i
+@@ -211,11 +211,11 @@
+   router->endFR();
+ }
+ 
+-void check_drc_cmd(const char* drc_file, int x1, int y1, int x2, int y2, const char* marker_name)
+-{
+-  auto* router = ord::OpenRoad::openRoad()->getTritonRoute();
+-  const int num_threads = ord::OpenRoad::openRoad()->getThreadCount();
+-  router->checkDRC(drc_file, x1, y1, x2, y2, marker_name, num_threads);
++void check_drc_cmd(const char* drc_file, int x1, int y1, int x2, int y2, const char* marker_name, bool check_ndr = false)
++{
++  auto* router = ord::OpenRoad::openRoad()->getTritonRoute();
++  const int num_threads = ord::OpenRoad::openRoad()->getThreadCount();
++  router->checkDRC(drc_file, x1, y1, x2, y2, marker_name, num_threads, check_ndr);
+ }
+ 
+ std::vector<int>
+diff --git a/src/drt/src/TritonRoute.tcl b/src/drt/src/TritonRoute.tcl
+--- a/src/drt/src/TritonRoute.tcl
++++ b/src/drt/src/TritonRoute.tcl
+@@ -468,11 +468,12 @@
+     [-box box]
+     [-output_file filename]
+     [-marker_name name]
++    [-check_ndr]
+ } ;# checker off
+ proc check_drc { args } {
+   sta::parse_key_args "check_drc" args \
+     keys { -box -output_file -marker_name } \
+-    flags {} ;# checker off
++    flags {-check_ndr} ;# checker off
+   sta::check_argc_eq0 "check_drc" $args
+   set box { 0 0 0 0 }
+   if { [info exists keys(-box)] } {
+@@ -491,7 +492,7 @@
+   } else {
+     utl::error DRT 613 "-output_file is required for check_drc command"
+   }
+-  drt::check_drc_cmd $output_file $x1 $y1 $x2 $y2 $marker_name
++  drt::check_drc_cmd $output_file $x1 $y1 $x2 $y2 $marker_name [info exists flags(-check_ndr)]
+ }
+ 
+ proc fix_max_spacing { args } {
+diff --git a/src/drt/test/current_db_drc.tcl b/src/drt/test/current_db_drc.tcl
+--- a/src/drt/test/current_db_drc.tcl
++++ b/src/drt/test/current_db_drc.tcl
+@@ -34,4 +34,26 @@
+ if {$first ne [check_report repeated 1]} {error "Repeated DRC changed"}
+ replace_route 0
+ if {[check_report removed 0] ne ""} {error "Removed patch still present"}
++# Parallel edges 27 DBU apart satisfy the base 18 DBU spacing but violate
++# an explicit 36 DBU NDR. Default checks must remain unchanged after opt-in.
++set ndr [odb::dbTechNonDefaultRule_create [ord::get_db_block] test_ndr]
++foreach layer [[ord::get_db_tech] getLayers] {
++ if {[$layer getType] ne "ROUTING"} {continue}
++ set rule [odb::dbTechLayerRule_create $ndr $layer]
++ $rule setWidth [$layer getWidth]
++ $rule setSpacing [$layer getSpacing]
++ if {[$layer getName] eq "M2"} {$rule setSpacing 36}
++}
++[[ord::get_db_block] findNet moving] setNonDefaultRule $ndr
++$enc begin $wire
++$enc newPath [[ord::get_db_tech] findLayer M2] ROUTED
++$enc addPoint 1050 1045
++$enc addPoint 1400 1045
++$enc end
++if {[check_report ndr_default_before 0] ne ""} {error "Base-spacing fixture is not clean"}
++set report [make_result_file current_db_drc_ndr.drc]
++drt::check_drc -check_ndr -output_file $report
++set stream [open $report r];set text [read $stream];close $stream
++if {![string match {*Metal Spacing*} $text]} {error "NDR violation not detected: $text"}
++if {[check_report ndr_default_after 0] ne ""} {error "NDR option leaked into subsequent checks"}
+ puts "pass"

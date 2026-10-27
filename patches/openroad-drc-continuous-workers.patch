@@ -1,0 +1,122 @@
+diff --git a/src/drt/src/TritonRoute.cpp b/src/drt/src/TritonRoute.cpp
+--- a/src/drt/src/TritonRoute.cpp
++++ b/src/drt/src/TritonRoute.cpp
+@@ -1165,7 +1165,13 @@
+ void TritonRoute::getDRCMarkers(frList<std::unique_ptr<frMarker>>& markers,
+                                 const odb::Rect& requiredDrcBox)
+ {
+-  std::vector<std::vector<std::unique_ptr<FlexGCWorker>>> workersBatches(1);
++  struct DrcJob
++  {
++    odb::Rect drcBox;
++    odb::Rect extBox;
++    std::vector<std::unique_ptr<frMarker>> markers;
++  };
++  std::vector<DrcJob> jobs;
+   auto size = 7;
+   auto offset = 0;
+   auto gCellPatterns = design_->getTopBlock()->getGCellPatterns();
+@@ -1190,52 +1196,43 @@
+       if (!drcBox.intersects(requiredDrcBox)) {
+         continue;
+       }
+-      auto gcWorker = std::make_unique<FlexGCWorker>(
+-          design_->getTech(), logger_, router_cfg_.get());
+-      gcWorker->setDrcBox(drcBox);
+-      gcWorker->setExtBox(extBox);
+-      // Completed workers retain their geometry until the batch is collected.
+-      // Keep only one wave of workers resident; larger batches do not increase
+-      // parallelism and can retain the geometry of most of a large design.
+-      const int batch_size = std::max(
+-          1, std::min(router_cfg_->BATCHSIZE, router_cfg_->MAX_THREADS));
+-      if (workersBatches.back().size()
+-          >= static_cast<size_t>(batch_size)) {
+-        workersBatches.emplace_back();
++      jobs.push_back({drcBox, extBox, {}});
++    }
++  }
++  omp_set_num_threads(router_cfg_->MAX_THREADS);
++  // Keep geometry resident only for active workers. A continuous queue avoids
++  // waiting for the slowest region at every thread-sized batch boundary.
++#pragma omp parallel for schedule(dynamic)
++  for (int i = 0; i < jobs.size(); i++) {  // NOLINT
++    auto& job = jobs[i];
++    FlexGCWorker worker(design_->getTech(), logger_, router_cfg_.get());
++    worker.setDrcBox(job.drcBox);
++    worker.setExtBox(job.extBox);
++    worker.init(design_.get());
++    worker.main();
++    for (const auto& marker : worker.getMarkers()) {
++      const odb::Rect bbox = marker->getBBox();
++      if (bbox.intersects(job.drcBox) && bbox.intersects(requiredDrcBox)) {
++        job.markers.push_back(std::make_unique<frMarker>(*marker));
+       }
+-      workersBatches.back().push_back(std::move(gcWorker));
+-    }
+-  }
++    }
++  }
++  // Merge in the original region and marker order, independent of completion
++  // order. Only marker copies survive each worker's geometry destruction.
+   std::map<MarkerId, frMarker*> mapMarkers;
+-  omp_set_num_threads(router_cfg_->MAX_THREADS);
+-  for (auto& workers : workersBatches) {
+-#pragma omp parallel for schedule(dynamic)
+-    for (int i = 0; i < workers.size(); i++) {  // NOLINT
+-      workers[i]->init(design_.get());
+-      workers[i]->main();
+-    }
+-    for (const auto& worker : workers) {
+-      for (auto& marker : worker->getMarkers()) {
+-        odb::Rect bbox = marker->getBBox();
+-        // Geometry crossing the worker's query boundary can produce markers
+-        // outside its validated region, where neighboring pins/metal are absent.
+-        // The worker covering that region has the required surrounding context.
+-        if (!bbox.intersects(worker->getDrcBox())
+-            || !bbox.intersects(requiredDrcBox)) {
+-          continue;
+-        }
+-        auto layerNum = marker->getLayerNum();
+-        auto con = marker->getConstraint();
+-        if (mapMarkers.find({bbox, layerNum, con, marker->getSrcs()})
+-            != mapMarkers.end()) {
+-          continue;
+-        }
+-        markers.push_back(std::make_unique<frMarker>(*marker));
+-        mapMarkers[{bbox, layerNum, con, marker->getSrcs()}]
+-            = markers.back().get();
++  for (auto& job : jobs) {
++    for (auto& marker : job.markers) {
++      const odb::Rect bbox = marker->getBBox();
++      const auto layerNum = marker->getLayerNum();
++      const auto con = marker->getConstraint();
++      if (mapMarkers.find({bbox, layerNum, con, marker->getSrcs()})
++          != mapMarkers.end()) {
++        continue;
+       }
+-    }
+-    workers.clear();
++      markers.push_back(std::move(marker));
++      mapMarkers[{bbox, layerNum, con, markers.back()->getSrcs()}]
++          = markers.back().get();
++    }
+   }
+ }
+ 
+diff --git a/src/drt/test/current_db_drc.tcl b/src/drt/test/current_db_drc.tcl
+--- a/src/drt/test/current_db_drc.tcl
++++ b/src/drt/test/current_db_drc.tcl
+@@ -32,6 +32,13 @@
+ replace_route 1
+ set first [check_report added 1]
+ if {$first ne [check_report repeated 1]} {error "Repeated DRC changed"}
++# Worker completion order must not change marker order or membership.
++foreach threads {1 4 2 1} {
++  set_thread_count $threads
++  if {$first ne [check_report "threads_${threads}" 1]} {
++    error "Parallel DRC changed markers with $threads threads"
++  }
++}
+ replace_route 0
+ if {[check_report removed 0] ne ""} {error "Removed patch still present"}
+ # Parallel edges 27 DBU apart satisfy the base 18 DBU spacing but violate

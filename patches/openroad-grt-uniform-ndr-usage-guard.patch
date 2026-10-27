@@ -1,0 +1,337 @@
+diff --git a/src/grt/src/fastroute/include/Graph2D.h b/src/grt/src/fastroute/include/Graph2D.h
+--- a/src/grt/src/fastroute/include/Graph2D.h
++++ b/src/grt/src/fastroute/include/Graph2D.h
+@@ -62,8 +62,22 @@
+ 
+   uint16_t getUsageH(int x, int y) const;
+   uint16_t getUsageV(int x, int y) const;
+-  int getNDROverflowH(int x, int y) const { return h_edges_[x][y].ndr_overflow; }
+-  int getNDROverflowV(int x, int y) const { return v_edges_[x][y].ndr_overflow; }
++  int getNDROverflowH(int x, int y) const
++  {
++    return h_edges_[x][y].ndr_overflow;
++  }
++  int getNDROverflowV(int x, int y) const
++  {
++    return v_edges_[x][y].ndr_overflow;
++  }
++  // Sanity-check demand without the artificial NDR congestion multiplier.
++  // The caller must establish a uniform cost for every NDR net in this routing
++  // state. Mixed NDR costs retain the original conservative usage guard.
++  bool usageWithinLimitWithUniformNDR(int x,
++                                      int y,
++                                      bool horizontal,
++                                      int limit,
++                                      int uniform_ndr_cost) const;
+   int16_t getLastUsageH(int x, int y) const;
+   int16_t getLastUsageV(int x, int y) const;
+   double getEstUsageH(int x, int y) const;
+@@ -132,6 +146,7 @@
+   std::vector<int> getMultipleCongestedNDRnet();
+ 
+  private:
++  static constexpr int kNDROverflowCostMultiplier = 100;
+   int x_grid_ = 0;
+   int y_grid_ = 0;
+   int num_layers_ = 0;
+diff --git a/src/grt/src/fastroute/src/graph2d.cpp b/src/grt/src/fastroute/src/graph2d.cpp
+--- a/src/grt/src/fastroute/src/graph2d.cpp
++++ b/src/grt/src/fastroute/src/graph2d.cpp
+@@ -164,6 +164,34 @@
+ uint16_t Graph2D::getUsageV(const int x, const int y) const
+ {
+   return v_edges_[x][y].usage;
++}
++
++bool Graph2D::usageWithinLimitWithUniformNDR(int x,
++                                             int y,
++                                             bool horizontal,
++                                             int limit,
++                                             int uniform_ndr_cost) const
++{
++  const auto& edge = horizontal ? h_edges_[x][y] : v_edges_[x][y];
++  if (edge.usage <= limit) {
++    return true;
++  }
++  if (uniform_ndr_cost <= 1 || edge.ndr_overflow == 0) {
++    return false;
++  }
++  const auto& nets = horizontal ? h_ndr_nets_[x][y] : v_ndr_nets_[x][y];
++  if (edge.ndr_overflow > nets.size()) {
++    return false;
++  }
++  for (const auto* net : nets) {
++    if (net->getEdgeCost() != uniform_ndr_cost) {
++      return false;
++    }
++  }
++  const int64_t penalty = int64_t(edge.ndr_overflow)
++                          * (kNDROverflowCostMultiplier - 1) * uniform_ndr_cost;
++  const int64_t demand = int64_t(edge.usage) - penalty;
++  return demand >= 0 && demand <= limit;
+ }
+ 
+ int16_t Graph2D::getLastUsageH(int x, int y) const
+@@ -645,8 +673,6 @@
+     return edge_cost;
+   }
+ 
+-  constexpr double OVERFLOW_COST_MULTIPLIER = 100.0;
+-
+   // Get references to the appropriate edge data based on direction
+   auto& edge = (direction == EdgeDirection::Horizontal) ? h_edges_[x][y]
+                                                         : v_edges_[x][y];
+@@ -668,7 +694,7 @@
+       // the big edge cost value
+       if (edge.ndr_overflow > 0) {
+         edge.ndr_overflow--;
+-        final_edge_cost = -OVERFLOW_COST_MULTIPLIER * edgeCost;
++        final_edge_cost = -kNDROverflowCostMultiplier * edgeCost;
+       } else {
+         final_edge_cost = -edgeCost;
+       }
+@@ -685,7 +711,7 @@
+       // the big edge cost value
+       if (edge.ndr_overflow > 0 || !hasNDRCapacity(net, x, y, direction)) {
+         edge.ndr_overflow++;
+-        final_edge_cost = OVERFLOW_COST_MULTIPLIER * edgeCost;
++        final_edge_cost = kNDROverflowCostMultiplier * edgeCost;
+       } else {
+         final_edge_cost = edgeCost;
+       }
+diff --git a/src/grt/src/fastroute/src/utility.cpp b/src/grt/src/fastroute/src/utility.cpp
+--- a/src/grt/src/fastroute/src/utility.cpp
++++ b/src/grt/src/fastroute/src/utility.cpp
+@@ -2004,11 +2004,11 @@
+         for (int i = 0; i < route.routelen; ++i) {
+           const auto& a = route.grids[i];
+           const auto& b = route.grids[i + 1];
+-          const bool crosses = horizontal
+-              ? a.y == y && b.y == y && std::min(a.x, b.x) == x
+-                    && std::max(a.x, b.x) == x + 1
+-              : a.x == x && b.x == x && std::min(a.y, b.y) == y
+-                    && std::max(a.y, b.y) == y + 1;
++          const bool crosses
++              = horizontal ? a.y == y && b.y == y && std::min(a.x, b.x) == x
++                                 && std::max(a.x, b.x) == x + 1
++                           : a.x == x && b.x == x && std::min(a.y, b.y) == y
++                                 && std::max(a.y, b.y) == y + 1;
+           crossings += crosses;
+         }
+       }
+@@ -2018,25 +2018,60 @@
+         contributors.emplace_back(usage, net_id);
+       }
+     }
+-    std::sort(contributors.begin(), contributors.end(),
++    std::sort(contributors.begin(),
++              contributors.end(),
+               [](const auto& a, const auto& b) {
+-                return a.first != b.first ? a.first > b.first : a.second < b.second;
++                return a.first != b.first ? a.first > b.first
++                                          : a.second < b.second;
+               });
+-    logger_->report("Overflow edge ({}, {}) {}: base_crossing_usage={} nets={} "
+-                    "incomplete_paths={} ndr_overflow={} stored_usage={}",
+-                    x, y, horizontal ? "H" : "V", base_crossing_usage,
+-                    contributors.size(), incomplete_paths,
+-                    horizontal ? graph2d_.getNDROverflowH(x, y)
+-                               : graph2d_.getNDROverflowV(x, y),
+-                    horizontal ? graph2d_.getUsageH(x, y)
+-                               : graph2d_.getUsageV(x, y));
++    logger_->report(
++        "Overflow edge ({}, {}) {}: base_crossing_usage={} nets={} "
++        "incomplete_paths={} ndr_overflow={} stored_usage={}",
++        x,
++        y,
++        horizontal ? "H" : "V",
++        base_crossing_usage,
++        contributors.size(),
++        incomplete_paths,
++        horizontal ? graph2d_.getNDROverflowH(x, y)
++                   : graph2d_.getNDROverflowV(x, y),
++        horizontal ? graph2d_.getUsageH(x, y) : graph2d_.getUsageV(x, y));
+     for (size_t i = 0; i < std::min<size_t>(20, contributors.size()); ++i) {
+       const auto [usage, net_id] = contributors[i];
+       const auto* net = nets_[net_id];
+-      logger_->report("  crossing net={} usage={} edge_cost={} clock={} pins={}",
+-                      net->getName(), usage, net->getEdgeCost(), net->isClock(),
+-                      net->getNumPins());
+-    }
++      logger_->report(
++          "  crossing net={} usage={} edge_cost={} clock={} pins={}",
++          net->getName(),
++          usage,
++          net->getEdgeCost(),
++          net->isClock(),
++          net->getNumPins());
++    }
++  };
++  // The usage field also carries a 100x heuristic penalty for NDR overflow.
++  // It is not physical track demand. Remove that penalty from this sanity
++  // check only when its value is exact: all NDR nets have one common cost.
++  // Compute lazily; ordinary routes never pay for a net scan. Keep the original
++  // fatal guard for mixed-cost or inconsistent states. Maze costs, capacities,
++  // overflow accounting and final routing acceptance remain unchanged.
++  int uniform_ndr_cost = -1;
++  const auto within_limit = [&](int x, int y, bool horizontal, int limit) {
++    if (uniform_ndr_cost < 0) {
++      uniform_ndr_cost = 0;
++      for (const auto* net : nets_) {
++        if (net == nullptr || net->getEdgeCost() == 1) {
++          continue;
++        }
++        const int cost = net->getEdgeCost();
++        if (cost <= 1 || (uniform_ndr_cost != 0 && uniform_ndr_cost != cost)) {
++          uniform_ndr_cost = 0;
++          break;
++        }
++        uniform_ndr_cost = cost;
++      }
++    }
++    return graph2d_.usageWithinLimitWithUniformNDR(
++        x, y, horizontal, limit, uniform_ndr_cost);
+   };
+   const int max_usage_multiplier = 100;
+   int max_h_edge_usage = max_usage_multiplier * h_capacity_;
+@@ -2044,7 +2079,8 @@
+ 
+   // check horizontal edges
+   for (const auto& [x, y] : graph2d_.getUsedGridsH()) {
+-    if (graph2d_.getUsageH(x, y) > max_h_edge_usage) {
++    if (graph2d_.getUsageH(x, y) > max_h_edge_usage
++        && !within_limit(x, y, true, max_h_edge_usage)) {
+       report_crossings(x, y, true);
+       logger_->error(GRT,
+                      228,
+@@ -2059,7 +2095,8 @@
+ 
+   // check vertical edges
+   for (const auto& [x, y] : graph2d_.getUsedGridsV()) {
+-    if (graph2d_.getUsageV(x, y) > max_v_edge_usage) {
++    if (graph2d_.getUsageV(x, y) > max_v_edge_usage
++        && !within_limit(x, y, false, max_v_edge_usage)) {
+       report_crossings(x, y, false);
+       logger_->error(GRT,
+                      229,
+diff --git a/src/grt/test/BUILD b/src/grt/test/BUILD
+--- a/src/grt/test/BUILD
++++ b/src/grt/test/BUILD
+@@ -248,3 +248,11 @@
+     check_passfail = True,
+     data = [":test_resources"],
+ )
++
++cc_test(
++    name = "ndr_usage_guard_test",
++    srcs = ["ndr_usage_guard_test.cpp"],
++    linkstatic = True,
++    features = ["-layering_check", "-use_header_modules"],
++    deps = ["//src/grt:fastroute", "//src/grt", "//src/odb/src/db", "//src/utl", "@googletest//:gtest_main"],
++)
+diff --git a/src/grt/test/ndr_usage_guard_test.cpp b/src/grt/test/ndr_usage_guard_test.cpp
+new file mode 100644
+--- /dev/null
++++ b/src/grt/test/ndr_usage_guard_test.cpp
+@@ -0,0 +1,101 @@
++// SPDX-License-Identifier: BSD-3-Clause
++#include <array>
++#include <string>
++
++#include "Graph2D.h"
++#include "gtest/gtest.h"
++#include "odb/db.h"
++#include "utl/Logger.h"
++
++namespace grt {
++class NDRUsageGuard : public testing::Test
++{
++ protected:
++  odb::dbDatabase* db = nullptr;
++  odb::dbBlock* block = nullptr;
++  utl::Logger logger;
++  std::array<FrNet, 17> nets;
++  Graph2D graph;
++  void SetUp() override
++  {
++    db = odb::dbDatabase::create();
++    auto* tech = odb::dbTech::create(db, "tech");
++    block = odb::dbBlock::create(odb::dbChip::create(db, tech), "top");
++    graph.init(3, 3, 1, &logger);
++    graph.initCap3D();
++    graph.updateCap3D(0, 0, 0, EdgeDirection::Horizontal, 12);
++    graph.updateCap3D(0, 0, 0, EdgeDirection::Vertical, 12);
++    for (int i = 0; i < nets.size(); ++i) {
++      const int cost = i == 15 ? 1 : (i == 16 ? 4 : 3);
++      auto* net
++          = odb::dbNet::create(block, ("net" + std::to_string(i)).c_str());
++      nets[i].reset(
++          net, true, 0, cost, 0, 0, 0, new std::vector<int8_t>{int8_t(cost)});
++    }
++  }
++  void TearDown() override { odb::dbDatabase::destroy(db); }
++  void add(bool estimated)
++  {
++    for (int i = 0; i < 16; ++i) {
++      const int cost = nets[i].getEdgeCost();
++      if (estimated) {
++        graph.updateEstUsageH(0, 0, &nets[i], cost / 2.0);
++        graph.updateEstUsageH(0, 0, &nets[i], cost / 2.0);
++        graph.updateEstUsageV(0, 0, &nets[i], cost / 2.0);
++        graph.updateEstUsageV(0, 0, &nets[i], cost / 2.0);
++      } else {
++        graph.updateUsageH(0, 0, &nets[i], cost);
++        graph.updateUsageV(0, 0, &nets[i], cost);
++      }
++    }
++    if (estimated) {
++      graph.addEstUsageToUsage();
++    }
++  }
++};
++TEST_F(NDRUsageGuard, UniformPenaltyDoesNotChangeCostsOrHidePhysicalDemand)
++{
++  add(false);
++  EXPECT_EQ(graph.getNDROverflowH(0, 0), 11);
++  EXPECT_EQ(graph.getNDROverflowV(0, 0), 11);
++  EXPECT_EQ(graph.getUsageH(0, 0), 3313);
++  EXPECT_EQ(graph.getUsageV(0, 0), 3313);
++  for (bool horizontal : {true, false}) {
++    EXPECT_TRUE(
++        graph.usageWithinLimitWithUniformNDR(0, 0, horizontal, 3300, 3));
++    EXPECT_TRUE(graph.usageWithinLimitWithUniformNDR(0, 0, horizontal, 46, 3));
++    EXPECT_FALSE(graph.usageWithinLimitWithUniformNDR(0, 0, horizontal, 45, 3));
++    EXPECT_FALSE(
++        graph.usageWithinLimitWithUniformNDR(0, 0, horizontal, 3300, 2));
++    EXPECT_FALSE(
++        graph.usageWithinLimitWithUniformNDR(0, 0, horizontal, 3300, 0));
++  }
++  // This is a read-only guard: congestion penalties still guide maze routing.
++  EXPECT_EQ(graph.getUsageH(0, 0), 3313);
++  for (int i = 0; i < 16; ++i) {
++    graph.updateUsageH(0, 0, &nets[i], -nets[i].getEdgeCost());
++  }
++  EXPECT_EQ(graph.getUsageH(0, 0), 0);
++  EXPECT_EQ(graph.getNDROverflowH(0, 0), 0);
++  EXPECT_EQ(graph.getUsageV(0, 0), 3313);
++}
++TEST_F(NDRUsageGuard, EstimatedHalfRoutesAndStateCopiesKeepPenaltyCounts)
++{
++  add(true);
++  EXPECT_EQ(graph.getUsageH(0, 0), 3313);
++  Graph2D copied;
++  copied.init(3, 3, 1, &logger);
++  copied.initCap3D();
++  copied.copyRoutingStateFrom(graph, true);
++  EXPECT_TRUE(copied.usageWithinLimitWithUniformNDR(0, 0, true, 3300, 3));
++  EXPECT_FALSE(copied.usageWithinLimitWithUniformNDR(0, 0, true, 45, 3));
++}
++TEST_F(NDRUsageGuard, MixedCostsAndUnexplainedUsageKeepOriginalGuard)
++{
++  graph.addUsageH(1, 0, 5000);
++  EXPECT_FALSE(graph.usageWithinLimitWithUniformNDR(1, 0, true, 3300, 3));
++  add(false);
++  graph.updateUsageH(0, 0, &nets[16], 4);
++  EXPECT_FALSE(graph.usageWithinLimitWithUniformNDR(0, 0, true, 3300, 3));
++}
++}  // namespace grt

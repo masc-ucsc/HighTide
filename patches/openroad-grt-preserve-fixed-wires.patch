@@ -1,0 +1,97 @@
+--- a/src/grt/src/GlobalRouter.cpp
++++ b/src/grt/src/GlobalRouter.cpp
+@@ -50,6 +50,7 @@
+ #include "odb/dbSet.h"
+ #include "odb/dbShape.h"
+ #include "odb/dbTypes.h"
++#include "odb/dbWireCodec.h"
+ #include "odb/geom.h"
+ #include "odb/geom_boost.h"
+ #include "odb/wOrder.h"
+@@ -65,6 +66,34 @@
+ #include "utl/timer.h"
+ 
+ namespace grt {
++namespace {
++// DEF imports can leave dbNet::getWireType() as ROUTED while the encoded
++// paths are FIXED. Inspect the actual paths before allowing an incremental
++// callback or congestion expansion to invalidate physical wiring.
++bool hasImmutableWire(odb::dbNet* net)
++{
++  auto* wire = net == nullptr ? nullptr : net->getWire();
++  if (wire == nullptr) {
++    return false;
++  }
++  odb::dbWireDecoder decoder;
++  decoder.begin(wire);
++  for (auto opcode = decoder.next(); opcode != odb::dbWireDecoder::END_DECODE;
++       opcode = decoder.next()) {
++    if (opcode != odb::dbWireDecoder::PATH
++        && opcode != odb::dbWireDecoder::SHORT
++        && opcode != odb::dbWireDecoder::JUNCTION) {
++      continue;
++    }
++    const auto type = decoder.getWireType();
++    if (type == odb::dbWireType::FIXED || type == odb::dbWireType::COVER) {
++      return true;
++    }
++  }
++  return false;
++}
++}  // namespace
++
+ 
+ using boost::icl::interval;
+ using utl::GRT;
+@@ -1043,6 +1072,11 @@
+ 
+   for (odb::dbNet* db_net : dirty_nets_) {
+     Net* net = db_net_map_[db_net];
++    if (hasImmutableWire(db_net)) {
++      net->setDirtyNet(false);
++      net->clearLastPinPositions();
++      continue;
++    }
+     updateNetPins(net);
+     destroyNetWire(net);
+     std::string pins_not_covered;
+@@ -6326,6 +6360,9 @@
+ 
+ void GlobalRouter::addDirtyNet(odb::dbNet* net)
+ {
++  if (hasImmutableWire(net)) {
++    return;
++  }
+   auto it = db_net_map_.find(net);
+   if (it == db_net_map_.end()) {
+     return;
+@@ -6340,6 +6377,19 @@
+ {
+   if (auto* pa = service_registry_->find<drt::PinAccessService>()) {
+     pa->updateDirtyPinAccess();
++  }
++
++  // A net may have acquired fixed wiring after being marked dirty. Filter
++  // here as well so both routing engines preserve its existing occupancy.
++  for (auto it = dirty_nets_.begin(); it != dirty_nets_.end();) {
++    if (hasImmutableWire(*it)) {
++      Net* net = db_net_map_.at(*it);
++      net->setDirtyNet(false);
++      net->clearLastPinPositions();
++      it = dirty_nets_.erase(it);
++    } else {
++      ++it;
++    }
+   }
+ 
+   if (use_cugr_) {
+@@ -6434,6 +6484,9 @@
+         // Copy the nets from the set to the vector of dirty nets
+         dirty_nets.clear();
+         for (odb::dbNet* db_net : congestion_nets) {
++          if (hasImmutableWire(db_net)) {
++            continue;
++          }
+           Net* fr_net = db_net_map_[db_net];
+           dirty_nets.push_back(db_net_map_[db_net]);
+           // Release resources on FastRouter

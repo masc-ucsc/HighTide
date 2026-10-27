@@ -1,0 +1,141 @@
+diff --git a/src/drt/src/gc/FlexGC_init.cpp b/src/drt/src/gc/FlexGC_init.cpp
+--- a/src/drt/src/gc/FlexGC_init.cpp
++++ b/src/drt/src/gc/FlexGC_init.cpp
+@@ -219,7 +219,13 @@
+       if (initDesign_skipObj(obj)) {
+         continue;
+       }
+-      initObj(box, i, obj, false);
++      // Targeted PA checks import only immutable signal routes above. Treat
++      // those as background geometry, just like the existing pins/obstacles,
++      // so violations between two pre-existing shapes do not reject every
++      // proposed access. The candidate objects added by addPAObj remain
++      // non-fixed and are checked against this geometry. Full-design GC has
++      // no target objects and retains its original validation behavior.
++      initObj(box, i, obj, !targetObjs_.empty());
+     }
+   }
+ }
+diff --git a/src/drt/test/BUILD b/src/drt/test/BUILD
+--- a/src/drt/test/BUILD
++++ b/src/drt/test/BUILD
+@@ -31,6 +31,7 @@
+ PASSFAIL_TESTS = [
+     "fixed_wire_pin_access",
+     "fixed_wire_existing_via",
++    "fixed_wire_background_drc",
+ ]
+ 
+ ALL_TESTS = COMPULSORY_TESTS + PASSFAIL_TESTS
+@@ -104,7 +105,7 @@
+         name = test_name + "_resources",
+         srcs = [":regression_resources"] + ([
+             "//src/psm/test:asap7_pin_access_lefs",
+-        ] if test_name in ["fixed_wire_pin_access", "fixed_wire_existing_via"] else []) + glob(
++        ] if test_name in ["fixed_wire_pin_access", "fixed_wire_existing_via", "fixed_wire_background_drc"] else []) + glob(
+             [
+                 test_name + ".*",
+             ],
+@@ -123,7 +124,7 @@
+         name = test_name,
+         size = "large" if test_name in BIG_TESTS else "small",
+         check_passfail = True if test_name in PASSFAIL_TESTS else False,
+-        check_log = test_name not in ["fixed_wire_pin_access", "fixed_wire_existing_via"],
++        check_log = test_name not in ["fixed_wire_pin_access", "fixed_wire_existing_via", "fixed_wire_background_drc"],
+         data = [":" + test_name + "_resources"],
+         visibility = ["//visibility:public"],
+     )
+diff --git a/src/drt/test/CMakeLists.txt b/src/drt/test/CMakeLists.txt
+--- a/src/drt/test/CMakeLists.txt
++++ b/src/drt/test/CMakeLists.txt
+@@ -18,6 +18,7 @@
+   PASSFAIL_TESTS
+     fixed_wire_pin_access
+     fixed_wire_existing_via
++    fixed_wire_background_drc
+     cpp_tests
+ )
+ 
+diff --git a/src/drt/test/fixed_wire_background_drc.def b/src/drt/test/fixed_wire_background_drc.def
+--- /dev/null
++++ b/src/drt/test/fixed_wire_background_drc.def
+@@ -0,0 +1,59 @@
++VERSION 5.8 ;
++DIVIDERCHAR "." ;
++BUSBITCHARS "[]" ;
++DESIGN access ;
++UNITS DISTANCE MICRONS 1000 ;
++DIEAREA ( 0 0 ) ( 10000 10000 ) ;
++GCELLGRID X 0 DO 11 STEP 1000 ;
++GCELLGRID Y 0 DO 11 STEP 1000 ;
++TRACKS X 116 DO 161 STEP 80 LAYER Pad ;
++TRACKS Y 116 DO 168 STEP 80 LAYER Pad ;
++TRACKS X 116 DO 161 STEP 80 LAYER M9 ;
++TRACKS Y 116 DO 168 STEP 80 LAYER M9 ;
++TRACKS X 116 DO 161 STEP 80 LAYER M8 ;
++TRACKS Y 116 DO 168 STEP 80 LAYER M8 ;
++TRACKS X 16 DO 203 STEP 64 LAYER M7 ;
++TRACKS Y 16 DO 211 STEP 64 LAYER M7 ;
++TRACKS X 60 DO 269 STEP 48 LAYER M6 ;
++TRACKS Y 16 DO 211 STEP 64 LAYER M6 ;
++TRACKS X 12 DO 270 STEP 48 LAYER M5 ;
++TRACKS Y 12 DO 281 STEP 48 LAYER M5 ;
++TRACKS X 45 DO 359 STEP 36 LAYER M4 ;
++TRACKS Y 12 DO 281 STEP 48 LAYER M4 ;
++TRACKS X 9 DO 360 STEP 36 LAYER M3 ;
++TRACKS Y 9 DO 375 STEP 36 LAYER M3 ;
++TRACKS X 9 DO 360 STEP 36 LAYER M2 ;
++TRACKS Y 45 DO 50 STEP 270 LAYER M2 ;
++TRACKS X 9 DO 360 STEP 36 LAYER M2 ;
++TRACKS Y 81 DO 50 STEP 270 LAYER M2 ;
++TRACKS X 9 DO 360 STEP 36 LAYER M2 ;
++TRACKS Y 117 DO 50 STEP 270 LAYER M2 ;
++TRACKS X 9 DO 360 STEP 36 LAYER M2 ;
++TRACKS Y 153 DO 50 STEP 270 LAYER M2 ;
++TRACKS X 9 DO 360 STEP 36 LAYER M2 ;
++TRACKS Y 189 DO 50 STEP 270 LAYER M2 ;
++TRACKS X 9 DO 360 STEP 36 LAYER M2 ;
++TRACKS Y 225 DO 50 STEP 270 LAYER M2 ;
++TRACKS X 9 DO 360 STEP 36 LAYER M2 ;
++TRACKS Y 270 DO 49 STEP 270 LAYER M2 ;
++TRACKS X 9 DO 360 STEP 36 LAYER M1 ;
++TRACKS Y 9 DO 375 STEP 36 LAYER M1 ;
++COMPONENTS 2 ;
++- u0 BUFx2_ASAP7_75t_R + FIXED ( 1080 1080 ) N ;
++- u1 BUFx2_ASAP7_75t_R + FIXED ( 2160 1080 ) N ;
++END COMPONENTS
++PINS 2 ;
++- p0 + NET obstacle + DIRECTION INPUT + USE SIGNAL
++ + LAYER M2 ( -9 -9 ) ( 9 9 ) + FIXED ( 909 1161 ) N ;
++- p1 + NET obstacle + DIRECTION OUTPUT + USE SIGNAL
++ + LAYER M2 ( -9 -9 ) ( 9 9 ) + FIXED ( 1197 1161 ) N ;
++END PINS
++NETS 5 ;
++- n0 ( u0 A ) + FIXED M2 ( 909 1161 0 ) ( 1197 1161 0 ) ;
++- n1 ( u0 Y ) ;
++- obstacle ( PIN p0 ) ( PIN p1 ) + USE SIGNAL
++ + FIXED M2 ( 909 1161 0 ) ( 1197 1161 0 ) ;
++- n2 ( u1 A ) ;
++- n3 ( u1 Y ) ;
++END NETS
++END DESIGN
+diff --git a/src/drt/test/fixed_wire_background_drc.tcl b/src/drt/test/fixed_wire_background_drc.tcl
+--- /dev/null
++++ b/src/drt/test/fixed_wire_background_drc.tcl
+@@ -0,0 +1,16 @@
++# Targeted PA ignores old background/background violations. Independent
++# full-design GC must still detect shorts between immutable signal traces.
++source "helpers.tcl"
++read_lef "../../psm/test/asap7/asap7_tech_1x_201209.lef"
++read_lef "../../psm/test/asap7/asap7sc7p5t_28_R_1x_220121a.lef"
++read_def "fixed_wire_background_drc.def"
++set drc_file [make_result_file fixed_wire_background_drc.drc]
++drt::check_drc -output_file $drc_file
++set file [open $drc_file r]
++set report [read $file]
++close $file
++if {![regexp {violation type: Short
++[[:space:]]+srcs: net:(n0 net:obstacle|obstacle net:n0)} $report]} {
++  error "Full-design GC failed to report the fixed/fixed short"
++}
++puts "pass"

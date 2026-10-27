@@ -1,0 +1,98 @@
+diff --git a/src/grt/src/GlobalRouter.cpp b/src/grt/src/GlobalRouter.cpp
+--- a/src/grt/src/GlobalRouter.cpp
++++ b/src/grt/src/GlobalRouter.cpp
+@@ -404,7 +404,15 @@
+     // check term count due to 1-pin nets in multiple designs.
+     if (!net->isSpecial() && net->getGuides().empty() && net->getTermCount() > 1
+         && !net->isConnectedByAbutment()) {
+-      return false;
++      // Physical signal routes need no guides in a mixed routed database.
++      // Via-only stacks can be pin access for a still-unrouted net; retain
++      // the guide requirement for those rather than accepting any dbWire.
++      uint32_t wire_count = 0;
++      uint32_t via_count = 0;
++      net->getWireCount(wire_count, via_count);
++      if (net->getWire() == nullptr || wire_count == 0) {
++        return false;
++      }
+     }
+   }
+   return true;
+diff --git a/src/grt/test/BUILD b/src/grt/test/BUILD
+--- a/src/grt/test/BUILD
++++ b/src/grt/test/BUILD
+@@ -234,3 +234,10 @@
+         "@googletest//:gtest_main",
+     ],
+ )
++
++regression_test(
++    name = "mixed_pre_routed_reload",
++    check_log = False,
++    check_passfail = True,
++    data = [":test_resources", "pre_routed1.tcl"],
++)
+diff --git a/src/grt/test/mixed_pre_routed_reload.tcl b/src/grt/test/mixed_pre_routed_reload.tcl
+--- /dev/null
++++ b/src/grt/test/mixed_pre_routed_reload.tcl
+@@ -0,0 +1,60 @@
++# Already routed signal nets need no global guides when reopening a mixed DB.
++source "pre_routed1.tcl"
++set checkpoint [make_result_file mixed_pre_routed_reload.odb]
++proc check_reload { checkpoint expected } {
++  set child [make_result_file mixed_pre_routed_reload_child.tcl]
++  set output [open $child w]
++  puts $output {read_liberty "sky130hs/sky130hs_tt.lib"}
++  puts $output [list read_db $checkpoint]
++  puts $output {set_routing_layers -signal met1-met5 -clock met3-met5}
++  puts $output [format {if {[grt::have_routes] != %d} {error "mixed guide reload readiness mismatch"}} $expected]
++  puts $output {exit}
++  close $output
++  exec [info nameofexecutable] -no_init -exit $child 2>@1
++  return 1
++}
++set wired 0
++foreach net [[ord::get_db_block] getNets] {
++  if {![$net isSpecial] && [$net getWire] ne "NULL" && [$net getTermCount] > 1 && [llength [$net getGuides]] == 0} {
++    incr wired
++  }
++}
++check "fixture has wired multi-pin nets without guides" {expr {$wired > 0}} 1
++write_db $checkpoint
++check "mixed global guides reload from saved DB" {check_reload $checkpoint 1} 1
++
++# A FIXED net-level type must work too, not only the DEF import's ROUTED type.
++foreach net [[ord::get_db_block] getNets] {
++  if {![$net isSpecial] && [$net getWire] ne "NULL"} {
++    $net setWireType FIXED
++  }
++}
++write_db $checkpoint
++check "mixed FIXED wire guides reload from saved DB" {check_reload $checkpoint 1} 1
++
++set removed 0
++foreach net [[ord::get_db_block] getNets] {
++  if {![$net isSpecial] && [$net getWire] eq "NULL" && [$net getTermCount] > 1 && [llength [$net getGuides]] > 0 && ![$net isConnectedByAbutment]} {
++    foreach guide [$net getGuides] { odb::dbGuide_destroy $guide }
++    set removed 1
++    break
++  }
++}
++check "removed an unwired net's required guides" {expr {$removed}} 1
++write_db $checkpoint
++check "missing guides on an unwired net still fail readiness" {check_reload $checkpoint 0} 1
++# A dbWire object alone is not enough: an empty wire or via-only pin access
++# must not disguise the missing global route.
++set wire [odb::dbWire_create $net]
++write_db $checkpoint
++check "empty dbWire still needs guides" {check_reload $checkpoint 0} 1
++set via [lindex [[ord::get_db_tech] getVias] 0]
++set encoder [odb::dbWireEncoder]
++$encoder begin $wire
++$encoder newPath [$via getBottomLayer] ROUTED
++$encoder addPoint 2000 2000
++$encoder addTechVia $via
++$encoder end
++write_db $checkpoint
++check "via-only access still needs guides" {check_reload $checkpoint 0} 1
++exit_summary

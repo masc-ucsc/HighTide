@@ -1,0 +1,40 @@
+diff --git a/src/psm/src/ir_solver.cpp b/src/psm/src/ir_solver.cpp
+--- a/src/psm/src/ir_solver.cpp
++++ b/src/psm/src/ir_solver.cpp
+@@ -161,6 +161,9 @@
+   Node* start = network_->getTopLayerNodes().begin()->get();
+   debugPrint(
+       logger_, utl::PSM, "check", 1, "Starting at: {}", start->describe(""));
++  // Mark on discovery so each node enters the queue only once. Marking on
++  // removal lets several already-discovered neighbors enqueue the same node.
++  start->setVisited(true);
+   queue.push(start);
+ 
+   std::size_t visited = 0;
+@@ -169,10 +172,6 @@
+   while (!queue.empty()) {
+     Node* node = queue.front();
+     queue.pop();
+-    if (node->isVisited()) {
+-      // already been here, so we can continue to next node
+-      continue;
+-    }
+ 
+     visited++;
+ 
+@@ -186,14 +185,13 @@
+                  total_nodes);
+     }
+ 
+-    node->setVisited(true);
+-
+     for (const auto* conn : connections_map.at(node)) {
+       Node* next = conn->getOtherNode(node);
+       if (next->isVisited()) {
+         // already been here, so we do not need to add it to the queue
+         continue;
+       }
++      next->setVisited(true);
+       queue.push(next);
+     }
+   }

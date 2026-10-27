@@ -1,0 +1,42 @@
+diff --git a/src/psm/src/ir_network.h b/src/psm/src/ir_network.h
+--- a/src/psm/src/ir_network.h
++++ b/src/psm/src/ir_network.h
+@@ -9,6 +9,7 @@
+ #include <optional>
+ #include <set>
+ #include <string>
++#include <unordered_map>
+ #include <vector>
+ 
+ #include "boost/geometry/geometry.hpp"
+@@ -106,7 +107,8 @@
+   void clearVisitedNodes();
+ 
+   const Connections& getConnections() const { return connections_; }
+-  NodePtrMap<Connection> getConnectionMap() const;
++  using ConnectionAdjacency = std::unordered_map<Node*, std::vector<Connection*>>;
++  ConnectionAdjacency getConnectionMap() const;
+ 
+   odb::PtrMap<odb::dbInst, Node::NodeSet> getInstanceNodeMapping() const;
+   ShapeTree getShapeTree(odb::dbTechLayer* layer) const;
+diff --git a/src/psm/src/ir_network.cpp b/src/psm/src/ir_network.cpp
+--- a/src/psm/src/ir_network.cpp
++++ b/src/psm/src/ir_network.cpp
+@@ -975,12 +975,15 @@
+   return 1;
+ }
+ 
+-IRNetwork::NodePtrMap<Connection> IRNetwork::getConnectionMap() const
++IRNetwork::ConnectionAdjacency IRNetwork::getConnectionMap() const
+ {
+   const utl::DebugScopedTimer timer(
+       logger_, utl::PSM, "timer", 1, "Build node -> connection mapping: {}");
+ 
+-  NodePtrMap<Connection> mapping;
++  // checkOpen only looks up a node's adjacency; key iteration order is unused.
++  // Keep each connection vector in the original connections_ insertion order.
++  ConnectionAdjacency mapping;
++  mapping.reserve(getNodeCount(true));
+ 
+   for (const auto& conn : connections_) {
+     mapping[conn->getNode0()].push_back(conn.get());

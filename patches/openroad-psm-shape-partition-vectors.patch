@@ -1,0 +1,71 @@
+diff --git a/src/psm/src/shape.cpp b/src/psm/src/shape.cpp
+--- a/src/psm/src/shape.cpp
++++ b/src/psm/src/shape.cpp
+@@ -150,20 +150,22 @@
+ {
+   // Process and filter nodes
+   const auto sorted_nodes = getNodes(layer_nodes);
+-  Node::NodeSet center_nodes;
+-  Node::NodeSet non_center_nodes;
++  // getNodes has already sorted and deduplicated with Node::Compare.
++  // Stable partitioning preserves precisely the former ordered-set sequence.
++  std::vector<Node*> center_nodes;
++  std::vector<Node*> non_center_nodes;
+   const odb::Point shape_center = shape_.center();
+   for (auto* node : sorted_nodes) {
+     const auto& pt = node->getPoint();
+     if (pt.x() == shape_center.x() || pt.y() == shape_center.y()) {
+-      center_nodes.insert(center_nodes.end(), node);
++      center_nodes.push_back(node);
+     } else {
+-      non_center_nodes.insert(non_center_nodes.end(), node);
++      non_center_nodes.push_back(node);
+     }
+   }
+ 
+   // Build RTree of nodes for searching
+-  Node::NodeSet shape_shared_nodes;
++  std::vector<Node*> shape_shared_nodes;
+   std::vector<std::unique_ptr<NodeData>> node_data;
+   const auto tree = createNodeDataValue(
+       sorted_nodes, shared_nodes, node_data, shape_shared_nodes);
+@@ -197,13 +199,13 @@
+     const std::vector<Node*>& nodes,
+     const std::set<Node*>& shared_nodes,
+     std::vector<std::unique_ptr<NodeData>>& container,
+-    Node::NodeSet& shape_shared_nodes) const
++    std::vector<Node*>& shape_shared_nodes) const
+ {
+   // Build RTree of nodes for searching
+   for (auto* node : nodes) {
+     if (shared_nodes.find(node) != shared_nodes.end()) {
+       // don't consider shared nodes
+-      shape_shared_nodes.insert(shape_shared_nodes.end(), node);
++      shape_shared_nodes.push_back(node);
+       continue;
+     }
+     auto data = std::make_unique<NodeData>();
+@@ -221,7 +223,7 @@
+ }
+ 
+ std::map<Node*, std::set<Node*>> Shape::mergeNodes(
+-    const Node::NodeSet& nodes,
++    const std::vector<Node*>& nodes,
+     int radius,
+     const NodeDataTree& tree,
+     std::set<Node*>& remove,
+diff --git a/src/psm/src/shape.h b/src/psm/src/shape.h
+--- a/src/psm/src/shape.h
++++ b/src/psm/src/shape.h
+@@ -68,9 +68,9 @@
+       const std::vector<Node*>& nodes,
+       const std::set<Node*>& shared_nodes,
+       std::vector<std::unique_ptr<NodeData>>& container,
+-      Node::NodeSet& shape_shared_nodes) const;
++      std::vector<Node*>& shape_shared_nodes) const;
+   std::map<Node*, std::set<Node*>> mergeNodes(
+-      const Node::NodeSet& nodes,
++      const std::vector<Node*>& nodes,
+       int radius,
+       const NodeDataTree& tree,
+       std::set<Node*>& remove,

@@ -1,0 +1,231 @@
+diff --git a/src/drt/src/frRegionQuery.cpp b/src/drt/src/frRegionQuery.cpp
+--- a/src/drt/src/frRegionQuery.cpp
++++ b/src/drt/src/frRegionQuery.cpp
+@@ -6,6 +6,7 @@
+ #include <algorithm>
+ #include <iterator>
+ #include <memory>
++#include <map>
+ #include <utility>
+ #include <vector>
+ 
+@@ -42,6 +43,13 @@
+   RouterConfiguration* router_cfg;
+   // only for pin shapes, obs and snet
+   RTreesByLayer<frBlockObject*> shapes;
++  // Large fixed via arrays share one local cut index per definition. The
++  // instance index is only a broad phase; queries still return exact cuts.
++  RTreesByLayer<frVia*> arrayCuts;
++  ObjectsByLayer<frVia> pendingArrayCuts;
++  std::map<const frViaDef*, RTree<frShape*>> masterCuts;
++  void queryArrayCuts(const odb::Rect& box, frLayerNum layer,
++                      Objects<frBlockObject>& result) const;
+   RTreesByLayer<frGuide*> guides;
+   RTreesByLayer<frNet*> origGuides;  // non-processed guides;
+   RTree<frBlockObject*> grPins;
+@@ -150,6 +158,17 @@
+                  + impl_->drObjs.at(layer_num).size());
+   for (auto [box, obj] : impl_->shapes.at(layer_num)) {
+     result.emplace_back(obj, box);
++  }
++  // Preserve the exhaustive API for max-spacing clients, including cut
++  // multiplicity. Do not return array envelopes as physical cut shapes.
++  for (const auto& entry : impl_->arrayCuts.at(layer_num)) {
++    auto* via = entry.second;
++    const auto xform = via->getTransform();
++    for (const auto& cut : via->getViaDef()->getCutFigs()) {
++      auto box = cut->getBBox();
++      xform.apply(box);
++      result.emplace_back(via, box);
++    }
+   }
+   for (auto [box, obj] : impl_->drObjs.at(layer_num)) {
+     result.emplace_back(obj, box);
+@@ -333,6 +352,26 @@
+       logger->error(DRT, 12, "Unsupported region query add.");
+     }
+   }
++  const auto* definition = via->getViaDef();
++  // Single-cut vias keep the existing fast path. For arrays the footprint
++  // count scales with instances plus definitions, not instances times cuts.
++  if (definition->getCutFigs().size() > 1) {
++    if (!masterCuts.contains(definition)) {
++      Objects<frShape> cuts;
++      cuts.reserve(definition->getCutFigs().size());
++      for (const auto& cut : definition->getCutFigs()) {
++        if (cut->typeId() != frcRect) {
++          logger->error(DRT, 13, "Unsupported region query add.");
++        }
++        cuts.emplace_back(cut->getBBox(), cut.get());
++      }
++      masterCuts.emplace(definition, RTree<frShape*>(cuts));
++    }
++    auto bounds = definition->getCutShapeBox();
++    xform.apply(bounds);
++    pendingArrayCuts.at(definition->getCutLayerNum()).emplace_back(bounds, via);
++    return;
++  }
+   for (auto& uShape : via->getViaDef()->getCutFigs()) {
+     auto shape = uShape.get();
+     if (shape->typeId() == frcRect) {
+@@ -481,12 +520,37 @@
+   allShapes.at(rect.getLayerNum()).emplace_back(frb, net);
+ }
+ 
++void frRegionQuery::Impl::queryArrayCuts(
++    const odb::Rect& box, frLayerNum layer, Objects<frBlockObject>& result) const
++{
++  const auto& instances = arrayCuts.at(layer);
++  for (auto it = instances.qbegin(bgi::intersects(box)); it != instances.qend(); ++it) {
++    auto* via = it->second;
++    const auto xform = via->getTransform();
++    auto inverse = xform;
++    inverse.invert();
++    auto local = box;
++    inverse.apply(local);
++    const auto& cuts = masterCuts.at(via->getViaDef());
++    for (auto cut = cuts.qbegin(bgi::intersects(local)); cut != cuts.qend(); ++cut) {
++      auto exact = cut->first;
++      xform.apply(exact);
++      result.emplace_back(exact, via);
++    }
++  }
++}
++
+ void frRegionQuery::query(const box_t& boostb,
+                           const frLayerNum layerNum,
+                           Objects<frBlockObject>& result) const
+ {
+   impl_->shapes.at(layerNum).query(bgi::intersects(boostb),
+                                    back_inserter(result));
++  const odb::Rect box(boost::geometry::get<boost::geometry::min_corner, 0>(boostb),
++                      boost::geometry::get<boost::geometry::min_corner, 1>(boostb),
++                      boost::geometry::get<boost::geometry::max_corner, 0>(boostb),
++                      boost::geometry::get<boost::geometry::max_corner, 1>(boostb));
++  impl_->queryArrayCuts(box, layerNum, result);
+ }
+ 
+ void frRegionQuery::query(const odb::Rect& box,
+@@ -494,6 +558,7 @@
+                           Objects<frBlockObject>& result) const
+ {
+   impl_->shapes.at(layerNum).query(bgi::intersects(box), back_inserter(result));
++  impl_->queryArrayCuts(box, layerNum, result);
+ }
+ 
+ void frRegionQuery::queryGuide(const odb::Rect& box,
+@@ -608,6 +673,11 @@
+   const frLayerNum numLayers = design->getTech()->getLayers().size();
+   shapes.clear();
+   shapes.resize(numLayers);
++  arrayCuts.clear();
++  arrayCuts.resize(numLayers);
++  pendingArrayCuts.clear();
++  pendingArrayCuts.resize(numLayers);
++  masterCuts.clear();
+ 
+   markers.clear();
+   markers.resize(numLayers);
+@@ -683,6 +753,9 @@
+     shapes.at(i) = boost::move(RTree<frBlockObject*>(allShapes.at(i)));
+     allShapes.at(i).clear();
+     allShapes.at(i).shrink_to_fit();
++    arrayCuts.at(i) = RTree<frVia*>(pendingArrayCuts.at(i));
++    pendingArrayCuts.at(i).clear();
++    pendingArrayCuts.at(i).shrink_to_fit();
+     if (router_cfg->VERBOSE > 0) {
+       logger->info(
+           DRT, 24, "  Complete {}.", design->getTech()->getLayer(i)->getName());
+diff --git a/src/drt/test/BUILD b/src/drt/test/BUILD
+--- a/src/drt/test/BUILD
++++ b/src/drt/test/BUILD
+@@ -248,3 +248,11 @@
+     test_name = "aes_nangate45",
+     visibility = ["//visibility:public"],
+ )
++
++cc_test(
++    name = "rq_array_unittest",
++    srcs = ["fixture.cpp", "fixture.h", "rqArrayTest.cpp"],
++    features = ["-layering_check"],
++    includes = ["../src"],
++    deps = ["//src/drt", "//src/drt:base_types", "//src/drt:db_hdrs", "//src/odb/src/db", "//src/utl", "@googletest//:gtest_main"],
++)
+diff --git a/src/drt/test/rqArrayTest.cpp b/src/drt/test/rqArrayTest.cpp
+new file mode 100644
+--- /dev/null
++++ b/src/drt/test/rqArrayTest.cpp
+@@ -0,0 +1,73 @@
++// SPDX-License-Identifier: BSD-3-Clause
++#include <algorithm>
++#include <cstdint>
++#include <tuple>
++#include "fixture.h"
++#include "frRTree.h"
++
++namespace drt {
++class ArrayQueryFixture : public Fixture {};
++TEST_F(ArrayQueryFixture, ExactCutsMatchBruteForceAndReinitialization)
++{
++  router_cfg->VERBOSE = 0;
++  addLayer(design->getTech(), "v1", odb::dbTechLayerType::CUT);
++  addLayer(design->getTech(), "m2", odb::dbTechLayerType::ROUTING);
++  auto net = std::make_unique<frNet>("VDD", router_cfg.get());
++  std::vector<frVia*> instances;
++  for (int count : {1, 4, 100}) {
++    auto def = std::make_unique<frViaDef>(std::to_string(count));
++    def->addLayer1Fig(std::make_unique<frRect>(-10, -10, 210, 210, 2, nullptr));
++    def->addLayer2Fig(std::make_unique<frRect>(-10, -10, 210, 210, 4, nullptr));
++    for (int i = 0; i < count; ++i) {
++      const int x = (i % 10) * 20 - 100, y = (i / 10) * 20 - 100;
++      def->addCutFig(std::make_unique<frRect>(x, y, x + 6, y + 8, 3, nullptr));
++    }
++    auto* master = design->getTech()->addVia(std::move(def));
++    for (int offset : {-200, 0, 200}) {
++      auto via = std::make_unique<frVia>(master, odb::Point(offset, -offset));
++      instances.push_back(via.get());
++      net->addVia(std::move(via));
++    }
++  }
++  design->getTopBlock()->addSNet(std::move(net));
++  auto* rq = design->getRegionQuery();
++  using Key = std::tuple<int, int, int, int, uintptr_t>;
++  auto keys = [](const auto& objects) {
++    std::vector<Key> out;
++    for (const auto& [box, object] : objects) {
++      out.emplace_back(box.xMin(), box.yMin(), box.xMax(), box.yMax(),
++                       reinterpret_cast<uintptr_t>(object));
++    }
++    std::sort(out.begin(), out.end());
++    return out;
++  };
++  for (int generation = 0; generation < 2; ++generation) {
++    rq->init();
++    rq->initDRObj();
++    for (int x = -350; x < 350; x += 17) {
++      for (int y = -350; y < 350; y += 19) {
++        const odb::Rect query(x, y, x + 17, y + 19);
++        frRegionQuery::Objects<frBlockObject> expected, actual, boost_actual;
++        for (auto* via : instances) {
++          for (const auto& cut : via->getViaDef()->getCutFigs()) {
++            auto box = cut->getBBox();
++            via->getTransform().apply(box);
++            if (box.intersects(query)) expected.emplace_back(box, via);
++          }
++        }
++        rq->query(query, 3, actual);
++        box_t boost_box;
++        boost::geometry::convert(query, boost_box);
++        rq->query(boost_box, 3, boost_actual);
++        EXPECT_EQ(keys(expected), keys(actual));
++        EXPECT_EQ(keys(expected), keys(boost_actual));
++      }
++    }
++    frRegionQuery::Objects<frBlockObject> exhaustive;
++    rq->query(odb::Rect(-10000, -10000, 10000, 10000), 3, exhaustive);
++    EXPECT_EQ(exhaustive.size(), 3 * (1 + 4 + 100));
++    // Old envelopes must not survive rebuilding after placement changes.
++    instances.back()->setOrigin(odb::Point(400, 400));
++  }
++}
++}  // namespace drt

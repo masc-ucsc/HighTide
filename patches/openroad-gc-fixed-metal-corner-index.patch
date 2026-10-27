@@ -1,0 +1,93 @@
+diff --git a/src/drt/src/gc/FlexGC_init.cpp b/src/drt/src/gc/FlexGC_init.cpp
+--- a/src/drt/src/gc/FlexGC_init.cpp
++++ b/src/drt/src/gc/FlexGC_init.cpp
+@@ -737,32 +737,31 @@
+   }
+ }
+ namespace {
+-bool isPolygonCorner(const frCoord x,
+-                     const frCoord y,
+-                     const gtl::polygon_90_set_data<frCoord>& poly_set)
+-{
++std::vector<std::pair<frCoord, frCoord>> fixedPolygonCorners(
++    const gtl::polygon_90_set_data<frCoord>& poly_set)
++{
++  std::vector<std::pair<frCoord, frCoord>> corners;
+   std::vector<gtl::polygon_90_with_holes_data<frCoord>> polygons;
+   poly_set.get(polygons);
+   for (const auto& polygon : polygons) {
+     for (const auto& pt : polygon) {
+-      if (pt.x() == x && pt.y() == y) {
+-        return true;
+-      }
++      corners.emplace_back(pt.x(), pt.y());
+     }
+     for (auto hole_itr = polygon.begin_holes(); hole_itr != polygon.end_holes();
+          ++hole_itr) {
+       for (const auto& pt : (*hole_itr)) {
+-        if (pt.x() == x && pt.y() == y) {
+-          return true;
+-        }
+-      }
+-    }
+-  }
+-  return false;
++        corners.emplace_back(pt.x(), pt.y());
++      }
++    }
++  }
++  std::sort(corners.begin(), corners.end());
++  corners.erase(std::unique(corners.begin(), corners.end()), corners.end());
++  return corners;
+ }
+ }  // namespace
+ void FlexGCWorker::Impl::initNet_pins_polygonCorners_helper(
+-    gcNet* net, gcPin* pin, const std::vector<FixedCutCorner>& fixedCorners)
++    gcNet* net, gcPin* pin, const std::vector<FixedCutCorner>& fixedCorners,
++    const std::vector<std::pair<frCoord, frCoord>>& metalCorners)
+ {
+   for (auto& edges : pin->getPolygonEdges()) {
+     std::vector<std::unique_ptr<gcCorner>> tmpCorners;
+@@ -833,9 +832,9 @@
+         }
+ 
+       } else {
+-        currCorner->setFixed(isPolygonCorner(currCorner->x(),
+-                                             currCorner->y(),
+-                                             net->getPolygons(true)[layerNum]));
++        currCorner->setFixed(std::binary_search(
++            metalCorners.begin(), metalCorners.end(),
++            std::make_pair(currCorner->x(), currCorner->y())));
+       }
+       // currCorner->setFixed(prevEdge->isFixed() && nextEdge->isFixed());
+ 
+@@ -875,8 +874,15 @@
+       fixedCorners.erase(std::unique(fixedCorners.begin(), fixedCorners.end()),
+                          fixedCorners.end());
+     }
++    // Fixed polygon geometry is unchanged while initializing this net/layer.
++    // Materialize its outer and hole vertices once, not once per pin corner.
++    std::vector<std::pair<frCoord, frCoord>> metalCorners;
++    if (getTech()->getLayer(i)->getType() != odb::dbTechLayerType::CUT
++        && !net->getPins(i).empty()) {
++      metalCorners = fixedPolygonCorners(net->getPolygons(true)[i]);
++    }
+     for (auto& pin : net->getPins(i)) {
+-      initNet_pins_polygonCorners_helper(net, pin.get(), fixedCorners);
++      initNet_pins_polygonCorners_helper(net, pin.get(), fixedCorners, metalCorners);
+     }
+   }
+ }
+diff --git a/src/drt/src/gc/FlexGC_impl.h b/src/drt/src/gc/FlexGC_impl.h
+--- a/src/drt/src/gc/FlexGC_impl.h
++++ b/src/drt/src/gc/FlexGC_impl.h
+@@ -203,7 +203,8 @@
+   void initNet_pins_polygonCorners(gcNet* net);
+   using FixedCutCorner = std::tuple<frCoord, frCoord, frCornerDirEnum>;
+   void initNet_pins_polygonCorners_helper(
+-      gcNet* net, gcPin* pin, const std::vector<FixedCutCorner>& fixedCorners);
++      gcNet* net, gcPin* pin, const std::vector<FixedCutCorner>& fixedCorners,
++      const std::vector<std::pair<frCoord, frCoord>>& metalCorners);
+   void initNet_pins_maxRectangles(gcNet* net);
+   void initNet_pins_maxRectangles_getFixedMaxRectangles(
+       gcNet* net,

@@ -1,0 +1,22 @@
+--- a/src/grt/src/GlobalRouter.cpp
++++ b/src/grt/src/GlobalRouter.cpp
+@@ -6464,14 +6464,14 @@
+       while (fastroute_->totalOverflow() && reroutingOverflow && add_max >= 0) {
+         // The nets that cross the congestion area are obtained and added to
+         // the set
+-        // if the nets have wires
++        // A partially pre-routed design has both detailed wires and global
++        // routes. Finding any wire must not hide the unrouted neighbors of a
++        // congested edge. Gather both populations; immutable wires are still
++        // excluded below before releasing resources or rerouting.
+         if (haveDetailedRoutes()) {
+-          // find nets on congestion areas using wires
+           getCongestionNets(congestion_nets);
+-        } else {
+-          // find nets on congestion areas using guides
+-          fastroute_->getCongestionNets(congestion_nets);
+         }
++        fastroute_->getCongestionNets(congestion_nets);
+         // When every attempt to increase the congestion region failed, try
+         // legalizing the buffers inserted
+         if (add_max == 0) {

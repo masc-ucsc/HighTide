@@ -1,0 +1,46 @@
+diff --git a/src/odb/src/db/dbInst.cpp b/src/odb/src/db/dbInst.cpp
+--- a/src/odb/src/db/dbInst.cpp
++++ b/src/odb/src/db/dbInst.cpp
+@@ -759,7 +759,19 @@
+ void dbInst::setDoNotTouch(bool v)
+ {
+   _dbInst* inst = (_dbInst*) this;
++  if (inst->flags_.dont_touch == v) {
++    return;
++  }
++  _dbBlock* block = (_dbBlock*) inst->getOwner();
++  const uint32_t previous_flags = flagsToUInt(inst);
+   inst->flags_.dont_touch = v;
++  // A scoped permission may surround an ECO connectivity edit. Undo must
++  // restore that permission before reversing the edit, then restore the
++  // original protection. Otherwise undo attempts to reconnect a locked pin.
++  if (block->journal_) {
++    block->journal_->updateField(
++        this, _dbInst::kFlags, previous_flags, flagsToUInt(inst));
++  }
+ }
+ 
+ bool dbInst::isDoNotTouch()
+diff --git a/src/rsz/test/fixed_endpoint_buffer.tcl b/src/rsz/test/fixed_endpoint_buffer.tcl
+--- a/src/rsz/test/fixed_endpoint_buffer.tcl
++++ b/src/rsz/test/fixed_endpoint_buffer.tcl
+@@ -56,5 +56,19 @@
+ insert_buffer -buffer_cell BUF_X1 -load_pins {load1/D load2/D} -buffer_name permitted_multi
+ if {[[$other findITerm D] getNet] eq $net || ![$other isDoNotTouch]} {error "Multi-load insertion failed or lost protection"}
+ if {[state $inst] ne $original || [wire_state $wire] ne $encoded} {error "Protected geometry changed"}
++set before_net [[$inst findITerm D] getNet]
++set before_count [llength [$block getInsts]]
++odb::dbDatabase_beginEco $block
++insert_buffer -buffer_cell BUF_X1 -load_pins {load0/D} -buffer_name undo_probe
++odb::dbDatabase_endEco $block
++if {![$inst isDoNotTouch]} {error "Insertion lost endpoint protection"}
++set eco_file [make_result_file fixed_endpoint_buffer.eco]
++odb::dbDatabase_writeEco $block $eco_file
++odb::dbDatabase_undoEco $block
++if {[[$inst findITerm D] getNet] ne $before_net || [llength [$block getInsts]] != $before_count || [state $inst] ne $original || [wire_state $wire] ne $encoded} {error "Undo failed to restore protected endpoint and wiring"}
++odb::dbDatabase_readEco $block $eco_file
++if {[[$inst findITerm D] getNet] eq $before_net || [llength [$block getInsts]] != $before_count + 1 || [state $inst] ne $original || [wire_state $wire] ne $encoded} {error "Replay failed to restore buffered protected endpoint"}
++odb::dbDatabase_undoEco $block
++if {[[$inst findITerm D] getNet] ne $before_net || [llength [$block getInsts]] != $before_count || [state $inst] ne $original || [wire_state $wire] ne $encoded} {error "Replay undo failed to restore protected endpoint"}
+ puts "pass"
+ } on error {message opts} {puts stderr "$message\n[dict get $opts -errorinfo]"; exit 1}

@@ -1,0 +1,13 @@
+diff --git a/src/odb/src/swig/common/odb.i b/src/odb/src/swig/common/odb.i
+--- a/src/odb/src/swig/common/odb.i
++++ b/src/odb/src/swig/common/odb.i
+@@ -42,6 +42,9 @@
+ %typemap(in) (int64_t) = (long);
+ %typemap(out) (int64_t) = (long);
+ %apply int* OUTPUT {int* x, int* y, int& ext};
++// Return DEF patch offsets to Tcl/Python instead of requiring inaccessible
++// C++ integer-reference arguments.
++%apply int* OUTPUT {int& deltaX1, int& deltaY1, int& deltaX2, int& deltaY2};
+ 
+ %ignore odb::dbTechLayerAntennaRule::pwl_pair;
+ %ignore odb::dbTechLayerAntennaRule::getDiffPAR() const;

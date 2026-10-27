@@ -1,0 +1,58 @@
+--- a/src/est/src/EstimateParasitics.cpp
++++ b/src/est/src/EstimateParasitics.cpp
+@@ -32,9 +32,11 @@
+ #include "odb/dbWireCodec.h"
+ #include "odb/geom.h"
+ #include "sta/ArcDelayCalc.hh"
++#include "sta/Clock.hh"
+ #include "sta/Graph.hh"
+ #include "sta/Liberty.hh"
+ #include "sta/MinMax.hh"
++#include "sta/Mode.hh"
+ #include "sta/Network.hh"
+ #include "sta/NetworkClass.hh"
+ #include "sta/Parasitics.hh"
+@@ -65,6 +67,19 @@
+ using odb::dbModInst;
+ 
+ namespace {
++// ClkNetwork's ideal traversal skips propagated clocks entirely. Inspect the
++// constraints first so incremental RC updates after CTS need not reconstruct
++// the clock network just to discover that its ideal-pin set must be empty.
++// Do not cache this: set/unset_propagated_clock can change between updates.
++bool modeHasIdealClocks(const sta::Mode* mode)
++{
++  for (const sta::Clock* clock : mode->sdc()->clocks()) {
++    if (!clock->isPropagated()) {
++      return true;
++    }
++  }
++  return false;
++}
+ // Fixed routes have no global guides. Keep their placement estimate available
+ // to intermediate timing repair; final OpenRCX extraction replaces this
+ // approximation with the realized wire RC. Inspect encoded paths because
+@@ -821,7 +836,10 @@
+                  "estimate wire {}",
+                  sdc_network_->pathName(net));
+       for (sta::Scene* corner : sta_->scenes()) {
+-        if (sta_->isIdealClock(drvr_pin, corner->mode())) {
++        const bool single_scene
++            = sta_->modes().size() == 1 && sta_->scenes().size() == 1;
++        if ((!single_scene || modeHasIdealClocks(corner->mode()))
++            && sta_->isIdealClock(drvr_pin, corner->mode())) {
+           continue;
+         }
+         std::set<const Pin*> connected_pins;
+@@ -1234,6 +1252,11 @@
+ 
+ bool EstimateParasitics::isIdealClockPin(const sta::Pin* pin) const
+ {
++  // Retain the original scene/mode synchronization in multi-scene flows.
++  if (sta_->modes().size() == 1 && sta_->scenes().size() == 1
++      && !modeHasIdealClocks(sta_->modes().front())) {
++    return false;
++  }
+   // An ideal clock pin carries fixed arrivals that do not depend on
+   // parasitics, so its parasitics never need re-estimation.
+   bool is_clock = false;

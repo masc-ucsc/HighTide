@@ -1,0 +1,72 @@
+diff --git a/src/odb/src/defin/definSNet.h b/src/odb/src/defin/definSNet.h
+--- a/src/odb/src/defin/definSNet.h
++++ b/src/odb/src/defin/definSNet.h
+@@ -5,6 +5,8 @@
+ 
+ #include <cstdint>
+ #include <map>
++#include <string>
++#include <unordered_map>
+ #include <vector>
+ 
+ #include "definBase.h"
+@@ -36,6 +38,10 @@
+   bool _has_prev_ext{false};
+   int _width{0};
+   int _point_cnt{0};
++  // Valid only while parsing the current special net. Keep successful
++  // block-via lookups; a missing definition must still be checked again.
++  std::unordered_map<std::string, dbVia*> _block_vias;
++  dbVia* findBlockVia(const char* name);
+ 
+  public:
+   int _snet_cnt{0};
+diff --git a/src/odb/src/defin/definSNet.cpp b/src/odb/src/defin/definSNet.cpp
+--- a/src/odb/src/defin/definSNet.cpp
++++ b/src/odb/src/defin/definSNet.cpp
+@@ -27,6 +27,7 @@
+ void definSNet::begin(const char* name)
+ {
+   assert(_cur_net == nullptr);
++  _block_vias.clear();
+ 
+   _cur_net = _block->findNet(name);
+ 
+@@ -338,6 +339,19 @@
+     _prev_ext = 0;
+     _has_prev_ext = false;
+   }
++}
++
++dbVia* definSNet::findBlockVia(const char* name)
++{
++  const auto found = _block_vias.find(name);
++  if (found != _block_vias.end()) {
++    return found->second;
++  }
++  auto* via = _block->findVia(name);
++  if (via != nullptr) {
++    _block_vias.emplace(name, via);
++  }
++  return via;
+ }
+ 
+ void definSNet::pathVia(const char* via_name,
+@@ -375,7 +389,7 @@
+       }
+     }
+   } else {
+-    dbVia* via = _block->findVia(via_name);
++    dbVia* via = findBlockVia(via_name);
+ 
+     if (via == nullptr) {
+       _logger->warn(
+@@ -442,7 +456,7 @@
+                                     _logger);
+     }
+   } else {
+-    dbVia* via = _block->findVia(via_name);
++    dbVia* via = findBlockVia(via_name);
+ 
+     if (via == nullptr) {
+       _logger->warn(

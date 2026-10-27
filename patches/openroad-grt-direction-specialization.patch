@@ -1,0 +1,45 @@
+--- a/src/grt/src/fastroute/src/maze.cpp
++++ b/src/grt/src/fastroute/src/maze.cpp
+@@ -1362,10 +1362,10 @@
+    * edge usage. It optionally adds a via cost and checks for potential hyper
+    * edges, updating adjacent grids accordingly.
+    */
+-  auto relaxAdjacent = [&](const int cur_x,
++  // Every call has a fixed direction. Specialize the grid accessors and
++  // coordinate offsets without changing relaxation order or cost arithmetic.
++  auto relaxAdjacent = [&]<int d_x, int d_y>(const int cur_x,
+                            const int cur_y,
+-                           const int d_x,
+-                           const int d_y,
+                            const bool add_via,
+                            const bool maybe_hyper,
+                            const int net_id) {
+@@ -1526,20 +1526,20 @@
+         removeMin(src_heap, heap_positions);
+ 
+         if (curX > regionX1) {  // left
+-          relaxAdjacent(
+-              curX, curY, -1, 0, preY != curY, curX < regionX2 - 1, netID);
++          relaxAdjacent.operator()<-1, 0>(
++              curX, curY, preY != curY, curX < regionX2 - 1, netID);
+         }
+         if (curX < regionX2) {  // right
+-          relaxAdjacent(
+-              curX, curY, 1, 0, preY != curY, curX > regionX1 + 1, netID);
++          relaxAdjacent.operator()<1, 0>(
++              curX, curY, preY != curY, curX > regionX1 + 1, netID);
+         }
+         if (curY > regionY1) {  // bottom
+-          relaxAdjacent(
+-              curX, curY, 0, -1, preX != curX, curY < regionY2 - 1, netID);
++          relaxAdjacent.operator()<0, -1>(
++              curX, curY, preX != curX, curY < regionY2 - 1, netID);
+         }
+         if (curY < regionY2) {  // top
+-          relaxAdjacent(
+-              curX, curY, 0, 1, preX != curX, curY > regionY1 + 1, netID);
++          relaxAdjacent.operator()<0, 1>(
++              curX, curY, preX != curX, curY > regionY1 + 1, netID);
+         }
+ 
+         // update ind1 for next loop

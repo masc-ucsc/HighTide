@@ -1,0 +1,94 @@
+diff --git a/src/grt/src/fastroute/src/utility.cpp b/src/grt/src/fastroute/src/utility.cpp
+--- a/src/grt/src/fastroute/src/utility.cpp
++++ b/src/grt/src/fastroute/src/utility.cpp
+@@ -1982,6 +1982,62 @@
+ 
+ void FastRouteCore::check2DEdgesUsage()
+ {
++  // Diagnose only the fatal overflow path; successful routing pays no scan.
++  // Report base path traversals and NDR penalty counts before raising the same
++  // error. Base crossings alone cannot diagnose stale NDR accounting.
++  const auto report_crossings = [&](int x, int y, bool horizontal) {
++    std::vector<std::pair<int64_t, int>> contributors;
++    int64_t base_crossing_usage = 0;
++    int incomplete_paths = 0;
++    for (const int net_id : net_ids_) {
++      int64_t crossings = 0;
++      for (const auto& edge : sttrees_[net_id].edges) {
++        if (edge.len <= 0) {
++          continue;
++        }
++        const auto& route = edge.route;
++        if (route.type != RouteType::MazeRoute || route.routelen < 0
++            || route.grids.size() <= static_cast<size_t>(route.routelen)) {
++          ++incomplete_paths;
++          continue;
++        }
++        for (int i = 0; i < route.routelen; ++i) {
++          const auto& a = route.grids[i];
++          const auto& b = route.grids[i + 1];
++          const bool crosses = horizontal
++              ? a.y == y && b.y == y && std::min(a.x, b.x) == x
++                    && std::max(a.x, b.x) == x + 1
++              : a.x == x && b.x == x && std::min(a.y, b.y) == y
++                    && std::max(a.y, b.y) == y + 1;
++          crossings += crosses;
++        }
++      }
++      if (crossings != 0) {
++        const int64_t usage = crossings * nets_[net_id]->getEdgeCost();
++        base_crossing_usage += usage;
++        contributors.emplace_back(usage, net_id);
++      }
++    }
++    std::sort(contributors.begin(), contributors.end(),
++              [](const auto& a, const auto& b) {
++                return a.first != b.first ? a.first > b.first : a.second < b.second;
++              });
++    logger_->report("Overflow edge ({}, {}) {}: base_crossing_usage={} nets={} "
++                    "incomplete_paths={} ndr_overflow={} stored_usage={}",
++                    x, y, horizontal ? "H" : "V", base_crossing_usage,
++                    contributors.size(), incomplete_paths,
++                    horizontal ? graph2d_.getNDROverflowH(x, y)
++                               : graph2d_.getNDROverflowV(x, y),
++                    horizontal ? graph2d_.getUsageH(x, y)
++                               : graph2d_.getUsageV(x, y));
++    for (size_t i = 0; i < std::min<size_t>(20, contributors.size()); ++i) {
++      const auto [usage, net_id] = contributors[i];
++      const auto* net = nets_[net_id];
++      logger_->report("  crossing net={} usage={} edge_cost={} clock={} pins={}",
++                      net->getName(), usage, net->getEdgeCost(), net->isClock(),
++                      net->getNumPins());
++    }
++  };
+   const int max_usage_multiplier = 100;
+   int max_h_edge_usage = max_usage_multiplier * h_capacity_;
+   int max_v_edge_usage = max_usage_multiplier * v_capacity_;
+@@ -1989,6 +2045,7 @@
+   // check horizontal edges
+   for (const auto& [x, y] : graph2d_.getUsedGridsH()) {
+     if (graph2d_.getUsageH(x, y) > max_h_edge_usage) {
++      report_crossings(x, y, true);
+       logger_->error(GRT,
+                      228,
+                      "Horizontal edge usage exceeds the maximum allowed. "
+@@ -2003,6 +2060,7 @@
+   // check vertical edges
+   for (const auto& [x, y] : graph2d_.getUsedGridsV()) {
+     if (graph2d_.getUsageV(x, y) > max_v_edge_usage) {
++      report_crossings(x, y, false);
+       logger_->error(GRT,
+                      229,
+                      "Vertical edge usage exceeds the maximum allowed. "
+diff --git a/src/grt/src/fastroute/include/Graph2D.h b/src/grt/src/fastroute/include/Graph2D.h
+--- a/src/grt/src/fastroute/include/Graph2D.h
++++ b/src/grt/src/fastroute/include/Graph2D.h
+@@ -62,6 +62,8 @@
+ 
+   uint16_t getUsageH(int x, int y) const;
+   uint16_t getUsageV(int x, int y) const;
++  int getNDROverflowH(int x, int y) const { return h_edges_[x][y].ndr_overflow; }
++  int getNDROverflowV(int x, int y) const { return v_edges_[x][y].ndr_overflow; }
+   int16_t getLastUsageH(int x, int y) const;
+   int16_t getLastUsageV(int x, int y) const;
+   double getEstUsageH(int x, int y) const;

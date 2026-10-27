@@ -1,0 +1,178 @@
+diff --git a/src/drt/src/TritonRoute.cpp b/src/drt/src/TritonRoute.cpp
+--- a/src/drt/src/TritonRoute.cpp
++++ b/src/drt/src/TritonRoute.cpp
+@@ -1247,10 +1247,39 @@
+                            const std::string& marker_name,
+                            int num_threads)
+ {
++  // Independent DRC must inspect current OpenDB wires, not the retained
++  // router geometry. Preserve the live PA/DR design and its configuration,
++  // including on exceptions. Parsing can adjust routing bounds and margins.
++  struct CheckDesignScope
++  {
++    std::unique_ptr<frDesign>& current;
++    std::unique_ptr<RouterConfiguration>& current_cfg;
++    std::unique_ptr<RouterConfiguration> saved_cfg;
++    std::unique_ptr<frDesign> saved;
++    ~CheckDesignScope()
++    {
++      current.swap(saved);
++      current_cfg.swap(saved_cfg);
++    }
++  };
++  auto check_cfg = std::make_unique<RouterConfiguration>(*router_cfg_);
++  auto check_design = std::make_unique<frDesign>(logger_, check_cfg.get());
++  CheckDesignScope scope{
++      design_, router_cfg_, std::move(check_cfg), std::move(check_design)};
++  design_.swap(scope.saved);
++  router_cfg_.swap(scope.saved_cfg);
+   router_cfg_->GC_IGNORE_PDN_LAYER_NUM = -1;
+   router_cfg_->REPAIR_PDN_LAYER_NUM = -1;
+   router_cfg_->MAX_THREADS = num_threads;
+-  initDesign();
++  if (db_ == nullptr || db_->getChip() == nullptr
++      || db_->getChip()->getBlock() == nullptr) {
++    logger_->error(utl::DRT, 151, "Database, chip or block not initialized.");
++  }
++  // Do not reset graphics or register callbacks against this temporary design.
++  io::Parser parser(db_, getDesign(), logger_, router_cfg_.get());
++  parser.readTechAndLibs(db_);
++  parser.readDesign(db_);
++  parser.postProcess();
+   auto gcellGrid = db_->getChip()->getBlock()->getGCellGrid();
+   if (gcellGrid != nullptr && gcellGrid->getNumGridPatternsX() == 1
+       && gcellGrid->getNumGridPatternsY() == 1) {
+diff --git a/src/drt/test/BUILD b/src/drt/test/BUILD
+--- a/src/drt/test/BUILD
++++ b/src/drt/test/BUILD
+@@ -29,6 +29,7 @@
+ 
+ # From CMakeLists.txt or_integration_tests(PASSFAIL_TESTS
+ PASSFAIL_TESTS = [
++    "current_db_drc",
+     "fixed_wire_pin_access",
+     "fixed_wire_existing_via",
+     "fixed_wire_background_drc",
+@@ -107,7 +108,7 @@
+         name = test_name + "_resources",
+         srcs = [":regression_resources"] + ([
+             "//src/psm/test:asap7_pin_access_lefs",
+-        ] if test_name in ["fixed_wire_pin_access", "fixed_wire_existing_via", "fixed_wire_background_drc", "fixed_wire_pattern_existing_via", "fixed_wire_short_via_escape"] else []) + glob(
++        ] if test_name in ["current_db_drc", "fixed_wire_pin_access", "fixed_wire_existing_via", "fixed_wire_background_drc", "fixed_wire_pattern_existing_via", "fixed_wire_short_via_escape"] else []) + glob(
+             [
+                 test_name + ".*",
+             ],
+@@ -126,7 +127,7 @@
+         name = test_name,
+         size = "large" if test_name in BIG_TESTS else "small",
+         check_passfail = True if test_name in PASSFAIL_TESTS else False,
+-        check_log = test_name not in ["fixed_wire_pin_access", "fixed_wire_existing_via", "fixed_wire_background_drc", "fixed_wire_pattern_existing_via", "fixed_wire_short_via_escape"],
++        check_log = test_name not in ["current_db_drc", "fixed_wire_pin_access", "fixed_wire_existing_via", "fixed_wire_background_drc", "fixed_wire_pattern_existing_via", "fixed_wire_short_via_escape"],
+         data = [":" + test_name + "_resources"],
+         visibility = ["//visibility:public"],
+     )
+diff --git a/src/drt/test/CMakeLists.txt b/src/drt/test/CMakeLists.txt
+--- a/src/drt/test/CMakeLists.txt
++++ b/src/drt/test/CMakeLists.txt
+@@ -16,6 +16,7 @@
+     top_level_term2
+     via_access_layer
+   PASSFAIL_TESTS
++    current_db_drc
+     fixed_wire_pin_access
+     fixed_wire_existing_via
+     fixed_wire_background_drc
+diff --git a/src/drt/test/current_db_drc.def b/src/drt/test/current_db_drc.def
+--- /dev/null
++++ b/src/drt/test/current_db_drc.def
+@@ -0,0 +1,49 @@
++VERSION 5.8 ;
++DIVIDERCHAR "." ;
++BUSBITCHARS "[]" ;
++DESIGN access ;
++UNITS DISTANCE MICRONS 1000 ;
++DIEAREA ( 0 0 ) ( 10000 10000 ) ;
++GCELLGRID X 0 DO 11 STEP 1000 ;
++GCELLGRID Y 0 DO 11 STEP 1000 ;
++TRACKS X 116 DO 161 STEP 80 LAYER Pad ;
++TRACKS Y 116 DO 168 STEP 80 LAYER Pad ;
++TRACKS X 116 DO 161 STEP 80 LAYER M9 ;
++TRACKS Y 116 DO 168 STEP 80 LAYER M9 ;
++TRACKS X 116 DO 161 STEP 80 LAYER M8 ;
++TRACKS Y 116 DO 168 STEP 80 LAYER M8 ;
++TRACKS X 16 DO 203 STEP 64 LAYER M7 ;
++TRACKS Y 16 DO 211 STEP 64 LAYER M7 ;
++TRACKS X 60 DO 269 STEP 48 LAYER M6 ;
++TRACKS Y 16 DO 211 STEP 64 LAYER M6 ;
++TRACKS X 12 DO 270 STEP 48 LAYER M5 ;
++TRACKS Y 12 DO 281 STEP 48 LAYER M5 ;
++TRACKS X 45 DO 359 STEP 36 LAYER M4 ;
++TRACKS Y 12 DO 281 STEP 48 LAYER M4 ;
++TRACKS X 9 DO 360 STEP 36 LAYER M3 ;
++TRACKS Y 9 DO 375 STEP 36 LAYER M3 ;
++TRACKS X 9 DO 360 STEP 36 LAYER M2 ;
++TRACKS Y 45 DO 50 STEP 270 LAYER M2 ;
++TRACKS X 9 DO 360 STEP 36 LAYER M2 ;
++TRACKS Y 81 DO 50 STEP 270 LAYER M2 ;
++TRACKS X 9 DO 360 STEP 36 LAYER M2 ;
++TRACKS Y 117 DO 50 STEP 270 LAYER M2 ;
++TRACKS X 9 DO 360 STEP 36 LAYER M2 ;
++TRACKS Y 153 DO 50 STEP 270 LAYER M2 ;
++TRACKS X 9 DO 360 STEP 36 LAYER M2 ;
++TRACKS Y 189 DO 50 STEP 270 LAYER M2 ;
++TRACKS X 9 DO 360 STEP 36 LAYER M2 ;
++TRACKS Y 225 DO 50 STEP 270 LAYER M2 ;
++TRACKS X 9 DO 360 STEP 36 LAYER M2 ;
++TRACKS Y 270 DO 49 STEP 270 LAYER M2 ;
++TRACKS X 9 DO 360 STEP 36 LAYER M1 ;
++TRACKS Y 9 DO 375 STEP 36 LAYER M1 ;
++COMPONENTS 0 ;
++END COMPONENTS
++PINS 0 ;
++END PINS
++NETS 2 ;
++- fixed + USE SIGNAL + FIXED M2 ( 1000 1000 0 ) ( 1501 1000 0 ) ;
++- moving + USE SIGNAL + ROUTED M2 ( 1536 1036 0 ) ( 1590 1036 0 ) ;
++END NETS
++END DESIGN
+diff --git a/src/drt/test/current_db_drc.tcl b/src/drt/test/current_db_drc.tcl
+--- /dev/null
++++ b/src/drt/test/current_db_drc.tcl
+@@ -0,0 +1,37 @@
++source "helpers.tcl"
++read_lef "../../psm/test/asap7/asap7_tech_1x_201209.lef"
++read_def "current_db_drc.def"
++set_routing_layers -signal M2-M7
++proc check_report {tag expect_corner} {
++  set path [make_result_file "current_db_drc_${tag}.drc"]
++  drt::check_drc -output_file $path
++  set stream [open $path r]
++  set text [read $stream]
++  close $stream
++  if {[string match {*Corner Spacing*} $text] != $expect_corner} {
++    error "Unexpected corner result for $tag: $text"
++  }
++  return $text
++}
++check_report before 0
++set wire [[[ord::get_db_block] findNet moving] getWire]
++set enc [odb::dbWireEncoder]
++proc replace_route {patch} {
++  global enc wire
++  $enc begin $wire
++  $enc newPath [[ord::get_db_tech] findLayer M2] ROUTED
++  $enc addPoint 1536 1036
++  $enc addPoint 1590 1036
++  if {$patch} {
++    $enc newPath [[ord::get_db_tech] findLayer M2] ROUTED
++    $enc addPoint 1536 1036
++    $enc addRect -32 -9 -14 9
++  }
++  $enc end
++}
++replace_route 1
++set first [check_report added 1]
++if {$first ne [check_report repeated 1]} {error "Repeated DRC changed"}
++replace_route 0
++if {[check_report removed 0] ne ""} {error "Removed patch still present"}
++puts "pass"

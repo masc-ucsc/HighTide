@@ -1,0 +1,106 @@
+diff --git a/src/psm/src/ir_network.cpp b/src/psm/src/ir_network.cpp
+--- a/src/psm/src/ir_network.cpp
++++ b/src/psm/src/ir_network.cpp
+@@ -4,6 +4,7 @@
+ #include "ir_network.h"
+ 
+ #include <algorithm>
++#include <stdexcept>
+ #include <array>
+ #include <cstddef>
+ #include <fstream>
+@@ -762,17 +763,83 @@
+   for (const auto& [layer, nodes] : nodes_) {
+     const auto layer_shapes = getShapeTree(layer);
+ 
+-    for (const auto& node : nodes) {
+-      const auto shapes = std::distance(
+-          layer_shapes.qbegin(
+-              boost::geometry::index::intersects(node->getPoint())),
+-          layer_shapes.qend());
+-      if (shapes > 1) {
+-        shared_nodes.insert(node.get());
+-      }
+-    }
+-  }
+-
++    // sortNodes() orders each layer by x, then y; overlap cleanup preserves
++    // that order. Query a whole occupied column once instead of traversing
++    // the shape R-tree for every cut in a dense via array.
++    std::vector<int> starts;
++    std::vector<int> ends;
++    for (std::size_t first = 0; first < nodes.size();) {
++      const int x = nodes[first]->getPoint().x();
++      std::size_t last = first + 1;
++      while (last < nodes.size() && nodes[last]->getPoint().x() == x) {
++        ++last;
++      }
++      if (last - first < 4) {
++        // Sparse columns need no sorting or temporary interval storage.
++        for (std::size_t i = first; i < last; ++i) {
++          auto shape = layer_shapes.qbegin(
++              boost::geometry::index::intersects(nodes[i]->getPoint()));
++          if (shape != layer_shapes.qend()
++              && ++shape != layer_shapes.qend()) {
++            shared_nodes.insert(nodes[i].get());
++          }
++        }
++      } else {
++        starts.clear();
++        ends.clear();
++        const odb::Rect column(x,
++                               nodes[first]->getPoint().y(),
++                               x,
++                               nodes[last - 1]->getPoint().y());
++        for (auto shape = layer_shapes.qbegin(
++                 boost::geometry::index::intersects(column));
++             shape != layer_shapes.qend();
++             ++shape) {
++          starts.push_back((*shape)->getShape().yMin());
++          ends.push_back((*shape)->getShape().yMax());
++        }
++        std::sort(starts.begin(), starts.end());
++        std::sort(ends.begin(), ends.end());
++        std::size_t entered = 0;
++        std::size_t exited = 0;
++        for (std::size_t i = first; i < last; ++i) {
++          const int y = nodes[i]->getPoint().y();
++          while (entered < starts.size() && starts[entered] <= y) {
++            ++entered;
++          }
++          // Shape boundaries are inclusive, matching the point query.
++          while (exited < ends.size() && ends[exited] < y) {
++            ++exited;
++          }
++          if (entered - exited > 1) {
++            shared_nodes.insert(nodes[i].get());
++          }
++        }
++      }
++      first = last;
++    }
++  }
++
++  // Optional exact oracle for regression/debug runs. Normal runs incur no
++  // per-node reference queries or extra shared-node storage.
++  if (logger_->debugCheck(utl::PSM, "shared_node_columns", 1)) {
++    std::set<Node*> reference;
++    for (const auto& [layer, nodes] : nodes_) {
++      const auto layer_shapes = getShapeTree(layer);
++      for (const auto& node : nodes) {
++        const auto count = std::distance(
++            layer_shapes.qbegin(
++                boost::geometry::index::intersects(node->getPoint())),
++            layer_shapes.qend());
++        if (count > 1) {
++          reference.insert(node.get());
++        }
++      }
++    }
++    if (reference != shared_nodes) {
++      throw std::logic_error("PSM shared-node column/reference mismatch");
++    }
++  }
+   return shared_nodes;
+ }
+ 

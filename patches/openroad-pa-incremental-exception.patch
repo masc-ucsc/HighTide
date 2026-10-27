@@ -1,0 +1,101 @@
+diff --git a/src/drt/src/pa/FlexPA.cpp b/src/drt/src/pa/FlexPA.cpp
+--- a/src/drt/src/pa/FlexPA.cpp
++++ b/src/drt/src/pa/FlexPA.cpp
+@@ -164,16 +164,22 @@
+     unique_inst_patterns_[unique_class]
+         = std::vector<std::unique_ptr<FlexPinAccessPattern>>();
+   }
++  ThreadException access_exception;
+ #pragma omp parallel for schedule(dynamic)
+   for (auto& unique_class : dirty_unique_classes_vec) {
+-    initSkipInstTerm(unique_class);
+-    auto candidate_inst = unique_class->getFirstInst();
+-    genInstAccessPoints(candidate_inst);
+-    revertAccessPoints(candidate_inst);
+-    if (isStdCell(candidate_inst)) {
+-      prepPatternInst(candidate_inst);
+-    }
+-  }
++    try {
++      initSkipInstTerm(unique_class);
++      auto candidate_inst = unique_class->getFirstInst();
++      genInstAccessPoints(candidate_inst);
++      revertAccessPoints(candidate_inst);
++      if (isStdCell(candidate_inst)) {
++        prepPatternInst(candidate_inst);
++      }
++    } catch (...) {
++      access_exception.capture();
++    }
++  }
++  access_exception.rethrow();
+   for (auto& inst : dirty_insts_) {
+     addToInstsSet(inst);
+   }
+diff --git a/src/grt/test/BUILD b/src/grt/test/BUILD
+--- a/src/grt/test/BUILD
++++ b/src/grt/test/BUILD
+@@ -241,3 +241,10 @@
+     check_passfail = True,
+     data = [":test_resources", "pre_routed1.tcl"],
+ )
++
++regression_test(
++    name = "incremental_pin_access_error",
++    check_log = False,
++    check_passfail = True,
++    data = [":test_resources"],
++)
+diff --git a/src/grt/test/CMakeLists.txt b/src/grt/test/CMakeLists.txt
+--- a/src/grt/test/CMakeLists.txt
++++ b/src/grt/test/CMakeLists.txt
+@@ -118,6 +118,7 @@
+     write_segments1
+     write_segments2
+   PASSFAIL_TESTS
++    incremental_pin_access_error
+     congestion_markers_cugr
+     congestion_report_file_cugr
+     snapshot_batched_bus_route
+diff --git a/src/grt/test/incremental_pin_access_error.tcl b/src/grt/test/incremental_pin_access_error.tcl
+--- /dev/null
++++ b/src/grt/test/incremental_pin_access_error.tcl
+@@ -0,0 +1,38 @@
++source "helpers.tcl"
++set_thread_count 4
++read_liberty Nangate45/Nangate45_typ.lib
++# Make a replacement input too small for access, but on the manufacturing grid.
++set stream [open Nangate45/Nangate45.lef r]
++set lef [read $stream]
++close $stream
++set start [string first "MACRO BUF_X16\n" $lef]
++set end [string first "END BUF_X16" $lef $start]
++if {$start < 0 || $end < $start} {error "Missing BUF_X16 fixture"}
++set macro [string range $lef $start [expr {$end-1}]]
++set original "RECT 0.06 0.525 0.185 0.715 ;"
++if {[string first $original $macro] < 0} {error "Missing input pin fixture"}
++set macro [string map [list $original "RECT 0.06 0.525 0.065 0.530 ;"] $macro]
++set modified [make_result_file incremental_pin_access_error.lef]
++set stream [open $modified w]
++puts -nonewline $stream "[string range $lef 0 [expr {$start-1}]]$macro[string range $lef $end end]"
++close $stream
++read_lef $modified
++read_def remove_buffers1.def
++set_routing_layers -signal metal2-metal8
++pin_access -via_in_pin_bottom_layer metal1 -via_in_pin_top_layer metal1
++global_route -allow_congestion
++global_route -start_incremental
++set inst [[ord::get_db_block] findInst b1]
++set replacement [[ord::get_db] findMaster BUF_X16]
++if {![$inst swapMaster $replacement]} {error "Replacement failed"}
++if {![catch {global_route -end_incremental} message]} {
++  error "Expected incremental pin-access failure"
++}
++if {![string match *DRT-0073* $message]} {error "Unexpected error: $message"}
++# The caller can save the failed design for diagnosis after catching.
++set checkpoint [make_result_file incremental_pin_access_error.odb]
++write_db $checkpoint
++if {![file exists $checkpoint] || [file size $checkpoint] == 0} {
++  error "Could not save failure checkpoint"
++}
++puts "pass"

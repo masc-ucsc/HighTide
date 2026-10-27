@@ -1,0 +1,50 @@
+diff --git a/src/psm/src/ir_network.cpp b/src/psm/src/ir_network.cpp
+--- a/src/psm/src/ir_network.cpp
++++ b/src/psm/src/ir_network.cpp
+@@ -851,7 +851,9 @@
+   const auto shared_nodes = getSharedShapeNodes();
+ 
+   const utl::Timer perform_timer;
+-  std::set<Node*> removes;
++  // Defer deletion until all shapes have copied their node connectivity, but
++  // avoid a tree allocation for every pending node across the whole network.
++  LayerMap<std::vector<Node*>> remove_by_layer;
+   for (auto& [layer, shapes] : shapes_) {
+     debugPrint(logger_,
+                utl::PSM,
+@@ -871,26 +873,21 @@
+           node_trees,
+           [&](Node* keep, Node* remove) { copy(keep, remove); },
+           shared_nodes);
+-      removes.insert(shape_remove.begin(), shape_remove.end());
++      auto& pending = remove_by_layer[layer];
++      pending.insert(pending.end(), shape_remove.begin(), shape_remove.end());
+     }
+   }
+ 
+   debugPrint(
+       logger_, utl::PSM, "timer", 1, "Perform merges: {}", perform_timer);
+ 
+-  LayerMap<std::set<Node*>> remove_by_layer;
+-  for (auto* node : removes) {
+-    remove_by_layer[node->getLayer()].insert(node);
+-  }
+-  removes.clear();
+-
+-  std::vector<std::pair<odb::dbTechLayer*, std::set<Node*>>> remove_sets;
+-  for (auto& [layer, layer_remove] : remove_by_layer) {
+-    remove_sets.emplace_back(layer, std::move(layer_remove));
+-  }
+-  remove_by_layer.clear();
+-
+-  for (auto& [layer, layer_remove] : remove_sets) {
++  for (auto& [layer, pending] : remove_by_layer) {
++    // Restore the original pointer-set iteration order and deduplicate nodes
++    // shared by overlapping shapes. Only one layer needs a tree at a time.
++    std::sort(pending.begin(), pending.end(), std::less<Node*>{});
++    pending.erase(std::unique(pending.begin(), pending.end()), pending.end());
++    std::set<Node*> layer_remove(pending.begin(), pending.end());
++    std::vector<Node*>().swap(pending);
+     debugPrint(logger_,
+                utl::PSM,
+                "construct",

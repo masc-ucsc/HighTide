@@ -1,0 +1,120 @@
+diff --git a/src/grt/test/BUILD b/src/grt/test/BUILD
+--- a/src/grt/test/BUILD
++++ b/src/grt/test/BUILD
+@@ -1,3 +1,4 @@
++load("@rules_cc//cc:cc_test.bzl", "cc_test")
+ load("@rules_python//python:defs.bzl", "py_test")
+ load("//test:regression.bzl", "doc_check_test", "regression_test")
+ 
+@@ -220,3 +221,16 @@
+     check_passfail = True,
+     data = [":test_resources", "pre_routed1.tcl"],
+ )
++
++cc_test(
++    name = "layer_overflow_positions_test",
++    srcs = ["layer_overflow_positions_test.cpp"],
++    features = ["-use_header_modules"],
++    deps = [
++        "//src/grt:fastroute",
++        "//src/grt",
++        "//src/odb/src/db",
++        "@googletest//:gtest",
++        "@googletest//:gtest_main",
++    ],
++)
+diff --git a/src/grt/test/layer_overflow_positions_test.cpp b/src/grt/test/layer_overflow_positions_test.cpp
+--- /dev/null
++++ b/src/grt/test/layer_overflow_positions_test.cpp
+@@ -0,0 +1,50 @@
++#include "FastRoute.h"
++
++#include <utility>
++#include <vector>
++
++#include "gtest/gtest.h"
++#include "odb/db.h"
++
++TEST(FastRouteOverflow, FindsLayerOverflowWithSparePlanarCapacity)
++{
++  auto* db = odb::dbDatabase::create();
++  auto* tech = odb::dbTech::create(db, "test_tech");
++  auto* chip = odb::dbChip::create(db, tech);
++  auto* block = odb::dbBlock::create(chip, "test");
++  auto* net = odb::dbNet::create(block, "signal");
++  {
++    grt::FastRouteCore router(db, nullptr, nullptr, nullptr, nullptr);
++    router.setGridsAndLayers(3, 3, 4);
++    router.initEdges();
++    router.addNet(net, false, false, 0, 1, 0, 3, 0.0, nullptr);
++    // Aggregate capacity is 11 in either direction, but the first layer
++    // of each direction can only accommodate one of the two tracks used.
++    router.setEdgeCapacity(0, 0, 1, 0, 1, 1);
++    router.setEdgeCapacity(0, 0, 1, 0, 3, 10);
++    router.setEdgeCapacity(1, 0, 1, 1, 2, 1);
++    router.setEdgeCapacity(1, 0, 1, 1, 4, 10);
++    router.updateEdge2DAnd3DUsage(0, 0, 1, 0, 1, 2, net);
++    router.updateEdge2DAnd3DUsage(1, 0, 1, 1, 2, 2, net);
++    std::vector<std::pair<odb::Point, bool>> positions;
++    router.getOverflowPositions(positions);
++    ASSERT_EQ(positions.size(), 2);
++    EXPECT_EQ(positions[0], std::make_pair(odb::Point(0, 0), true));
++    EXPECT_EQ(positions[1], std::make_pair(odb::Point(1, 0), false));
++
++    // Multiple overflowing layers at one planar location are not duplicates.
++    router.updateEdge2DAnd3DUsage(0, 0, 1, 0, 3, 11, net);
++    positions.clear();
++    router.getOverflowPositions(positions);
++    EXPECT_EQ(positions.size(), 2);
++
++    // Released routes must not leave stale overflow locations behind.
++    router.updateEdge2DAnd3DUsage(0, 0, 1, 0, 1, -2, net);
++    router.updateEdge2DAnd3DUsage(0, 0, 1, 0, 3, -11, net);
++    router.updateEdge2DAnd3DUsage(1, 0, 1, 1, 2, -2, net);
++    positions.clear();
++    router.getOverflowPositions(positions);
++    EXPECT_TRUE(positions.empty());
++  }
++  odb::dbDatabase::destroy(db);
++}
+diff --git a/src/grt/src/fastroute/src/maze.cpp b/src/grt/src/fastroute/src/maze.cpp
+--- a/src/grt/src/fastroute/src/maze.cpp
++++ b/src/grt/src/fastroute/src/maze.cpp
+@@ -2035,21 +2035,30 @@
+   }
+ }
+ 
+-// Get overflow positions
++// Get planar positions with either aggregate or layer-specific overflow.
+ void FastRouteCore::getOverflowPositions(
+     std::vector<std::pair<odb::Point, bool>>& overflow_pos)
+ {
+-  // Find horizontal ggrids with congestion
++  // Layer assignment can overflow a single layer even when the combined
++  // 2D capacity is sufficient. Include those locations when expanding the
++  // incremental rerouting neighborhood, once per position and direction.
+   for (const auto& [x, y] : graph2d_.getUsedGridsH()) {
+-    const int overflow = graph2d_.getOverflowH(x, y);
+-    if (overflow > 0) {
++    bool congested = graph2d_.getOverflowH(x, y) > 0;
++    for (int layer = 0; layer < num_layers_ && !congested; layer++) {
++      const auto& edge = h_edges_3D_[layer][y][x];
++      congested = edge.usage > edge.cap;
++    }
++    if (congested) {
+       overflow_pos.emplace_back(odb::Point(x, y), true);
+     }
+   }
+-  // Find vertical ggrids with congestion
+   for (const auto& [x, y] : graph2d_.getUsedGridsV()) {
+-    const int overflow = graph2d_.getOverflowV(x, y);
+-    if (overflow > 0) {
++    bool congested = graph2d_.getOverflowV(x, y) > 0;
++    for (int layer = 0; layer < num_layers_ && !congested; layer++) {
++      const auto& edge = v_edges_3D_[layer][y][x];
++      congested = edge.usage > edge.cap;
++    }
++    if (congested) {
+       overflow_pos.emplace_back(odb::Point(x, y), false);
+     }
+   }

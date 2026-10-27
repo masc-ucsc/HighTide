@@ -1,0 +1,80 @@
+diff --git a/src/drt/src/gc/FlexGC_impl.h b/src/drt/src/gc/FlexGC_impl.h
+--- a/src/drt/src/gc/FlexGC_impl.h
++++ b/src/drt/src/gc/FlexGC_impl.h
+@@ -8,6 +8,7 @@
+ #include <memory>
+ #include <set>
+ #include <string>
++#include <tuple>
+ #include <utility>
+ #include <vector>
+ 
+@@ -200,7 +201,9 @@
+       const std::vector<std::set<std::pair<odb::Point, odb::Point>>>&
+           fixedPolygonEdges);
+   void initNet_pins_polygonCorners(gcNet* net);
+-  void initNet_pins_polygonCorners_helper(gcNet* net, gcPin* pin);
++  using FixedCutCorner = std::tuple<frCoord, frCoord, frCornerDirEnum>;
++  void initNet_pins_polygonCorners_helper(
++      gcNet* net, gcPin* pin, const std::vector<FixedCutCorner>& fixedCorners);
+   void initNet_pins_maxRectangles(gcNet* net);
+   void initNet_pins_maxRectangles_getFixedMaxRectangles(
+       gcNet* net,
+diff --git a/src/drt/src/gc/FlexGC_init.cpp b/src/drt/src/gc/FlexGC_init.cpp
+--- a/src/drt/src/gc/FlexGC_init.cpp
++++ b/src/drt/src/gc/FlexGC_init.cpp
+@@ -746,8 +746,8 @@
+   return false;
+ }
+ }  // namespace
+-void FlexGCWorker::Impl::initNet_pins_polygonCorners_helper(gcNet* net,
+-                                                            gcPin* pin)
++void FlexGCWorker::Impl::initNet_pins_polygonCorners_helper(
++    gcNet* net, gcPin* pin, const std::vector<FixedCutCorner>& fixedCorners)
+ {
+   for (auto& edges : pin->getPolygonEdges()) {
+     std::vector<std::unique_ptr<gcCorner>> tmpCorners;
+@@ -801,13 +801,10 @@
+       if (getTech()->getLayer(layerNum)->getType()
+           == odb::dbTechLayerType::CUT) {
+         if (currCorner->getType() == frCornerTypeEnum::CONVEX) {
+-          currCorner->setFixed(false);
+-          for (auto& rect : net->getRectangles(true)[layerNum]) {
+-            if (isCornerOverlap(currCorner, rect)) {
+-              currCorner->setFixed(true);
+-              break;
+-            }
+-          }
++          const auto point = currCorner->getNextEdge()->low();
++          currCorner->setFixed(std::binary_search(
++              fixedCorners.begin(), fixedCorners.end(),
++              FixedCutCorner{point.x(), point.y(), currCorner->getDir()}));
+         } else if (currCorner->getType() == frCornerTypeEnum::CONCAVE) {
+           currCorner->setFixed(true);
+           auto cornerPt = currCorner->getNextEdge()->low();
+@@ -847,8 +844,24 @@
+ {
+   int numLayers = getTech()->getLayers().size();
+   for (int i = 0; i < numLayers; i++) {
++    // isCornerOverlap tests exact rectangle corners and their directions.
++    // Index once per net/layer instead of scanning all fixed cuts per corner.
++    // Keep this local: incremental net initialization rebuilds the index.
++    std::vector<FixedCutCorner> fixedCorners;
++    if (getTech()->getLayer(i)->getType() == odb::dbTechLayerType::CUT
++        && !net->getPins(i).empty()) {
++      for (const auto& rect : net->getRectangles(true)[i]) {
++        fixedCorners.emplace_back(gtl::xh(rect), gtl::yh(rect), frCornerDirEnum::NE);
++        fixedCorners.emplace_back(gtl::xh(rect), gtl::yl(rect), frCornerDirEnum::SE);
++        fixedCorners.emplace_back(gtl::xl(rect), gtl::yl(rect), frCornerDirEnum::SW);
++        fixedCorners.emplace_back(gtl::xl(rect), gtl::yh(rect), frCornerDirEnum::NW);
++      }
++      std::sort(fixedCorners.begin(), fixedCorners.end());
++      fixedCorners.erase(std::unique(fixedCorners.begin(), fixedCorners.end()),
++                         fixedCorners.end());
++    }
+     for (auto& pin : net->getPins(i)) {
+-      initNet_pins_polygonCorners_helper(net, pin.get());
++      initNet_pins_polygonCorners_helper(net, pin.get(), fixedCorners);
+     }
+   }
+ }

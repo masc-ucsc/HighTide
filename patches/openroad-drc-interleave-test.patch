@@ -1,0 +1,73 @@
+diff --git a/src/drt/test/BUILD b/src/drt/test/BUILD
+--- a/src/drt/test/BUILD
++++ b/src/drt/test/BUILD
+@@ -29,6 +29,7 @@
+ 
+ # From CMakeLists.txt or_integration_tests(PASSFAIL_TESTS
+ PASSFAIL_TESTS = [
++    "current_db_drc_interleave",
+     "current_db_drc",
+     "fixed_wire_pin_access",
+     "fixed_wire_existing_via",
+@@ -117,6 +118,7 @@
+         ] if test_name in [
+             "ispd18_sample_incr",
+             "single_step",
++            "current_db_drc_interleave",
+         ] else []),
+     )
+     for test_name in ALL_TESTS
+@@ -127,7 +129,7 @@
+         name = test_name,
+         size = "large" if test_name in BIG_TESTS else "small",
+         check_passfail = True if test_name in PASSFAIL_TESTS else False,
+-        check_log = test_name not in ["current_db_drc", "fixed_wire_pin_access", "fixed_wire_existing_via", "fixed_wire_background_drc", "fixed_wire_pattern_existing_via", "fixed_wire_short_via_escape"],
++        check_log = test_name not in ["current_db_drc_interleave", "current_db_drc", "fixed_wire_pin_access", "fixed_wire_existing_via", "fixed_wire_background_drc", "fixed_wire_pattern_existing_via", "fixed_wire_short_via_escape"],
+         data = [":" + test_name + "_resources"],
+         visibility = ["//visibility:public"],
+     )
+diff --git a/src/drt/test/CMakeLists.txt b/src/drt/test/CMakeLists.txt
+--- a/src/drt/test/CMakeLists.txt
++++ b/src/drt/test/CMakeLists.txt
+@@ -16,6 +16,7 @@
+     top_level_term2
+     via_access_layer
+   PASSFAIL_TESTS
++    current_db_drc_interleave
+     current_db_drc
+     fixed_wire_pin_access
+     fixed_wire_existing_via
+diff --git a/src/drt/test/current_db_drc_interleave.tcl b/src/drt/test/current_db_drc_interleave.tcl
+--- /dev/null
++++ b/src/drt/test/current_db_drc_interleave.tcl
+@@ -0,0 +1,30 @@
++source "helpers.tcl"
++
++read_lef testcase/ispd18_sample/ispd18_sample.input.lef
++read_def testcase/ispd18_sample/ispd18_sample.input.def
++read_guides testcase/ispd18_sample/ispd18_sample.input.guide
++set_routing_layers -signal Metal1-Metal9
++detailed_route -output_drc [make_result_file current_db_drc_interleave.output.drc.rpt] \
++  -output_maze [make_result_file current_db_drc_interleave.output.maze.log] \
++  -verbose 0 \
++  -single_step_dr
++
++drt::check_drc -output_file [make_result_file current_db_drc_interleave.drc]
++drt::step_dr 7 0 3 8 0 8 0.95 1 true
++drt::check_drc -output_file [make_result_file current_db_drc_interleave.drc]
++drt::step_dr 7 -2 3 8 8 8 0.95 1 true
++drt::check_drc -output_file [make_result_file current_db_drc_interleave.drc]
++drt::step_dr 7 -5 3 8 8 8 0.95 1 true
++drt::step_end
++
++set def_file [make_result_file current_db_drc_interleave.def]
++write_def $def_file
++# Independent checks must not change the paused router's design/configuration.
++set expected_stream [open ispd18_sample.defok r]
++set expected [read $expected_stream]
++close $expected_stream
++set actual_stream [open $def_file r]
++set actual [read $actual_stream]
++close $actual_stream
++if {$actual ne $expected} {error "DRC checks changed single-step routing"}
++puts "pass"

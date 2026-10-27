@@ -1,0 +1,235 @@
+diff --git a/src/drt/src/gc/FlexGC_init.cpp b/src/drt/src/gc/FlexGC_init.cpp
+--- a/src/drt/src/gc/FlexGC_init.cpp
++++ b/src/drt/src/gc/FlexGC_init.cpp
+@@ -163,6 +163,15 @@
+     case frcBTerm: {
+       auto term = static_cast<frTerm*>(obj);
+       return targetObjs_.find(term) == targetObjs_.end();
++    }
++    case frcPathSeg:
++    case frcVia:
++    case frcPatchWire: {
++      // Targeted pin-access checks must still see immutable signal wiring
++      // around the target instance. It cannot be ripped up to make room for
++      // an access via or extension chosen here.
++      const auto* figure = static_cast<frConnFig*>(obj);
++      return !figure->hasNet() || !figure->getNet()->isFixed();
+     }
+     default:
+       return true;
+diff --git a/src/drt/src/pa/FlexPA_unique.cpp b/src/drt/src/pa/FlexPA_unique.cpp
+--- a/src/drt/src/pa/FlexPA_unique.cpp
++++ b/src/drt/src/pa/FlexPA_unique.cpp
+@@ -12,6 +12,8 @@
+ 
+ #include "db/obj/frAccess.h"
+ #include "db/obj/frInst.h"
++#include "db/obj/frFig.h"
++#include "db/obj/frNet.h"
+ #include "db/obj/frMPin.h"
+ #include "db/obj/frTrackPattern.h"
+ #include "db/tech/frLayer.h"
+@@ -19,6 +21,7 @@
+ #include "drt-global.h"
+ #include "frBaseTypes.h"
+ #include "frDesign.h"
++#include "frRegionQuery.h"
+ #include "odb/db.h"
+ #include "odb/dbTypes.h"
+ 
+@@ -199,6 +202,35 @@
+   if (!router_cfg_->AUTO_TAPER_NDR_NETS && isNDRInst(inst)) {
+     ndr_inst = inst;
+   }
++  // Nearby FIXED signal routes make pin access placement-specific. Reuse
++  // the instance discriminator so a pattern generated elsewhere cannot
++  // introduce a via through that immutable wiring.
++  frCoord access_margin = 0;
++  const auto last_access_layer
++      = std::min(max_layer_num + 2, design_->getTech()->getTopLayerNum());
++  for (int layer = min_layer_num;
++       layer <= last_access_layer;
++       ++layer) {
++    access_margin = std::max(
++        access_margin,
++        static_cast<frCoord>(5 * design_->getTech()->getLayer(layer)->getPitch()));
++  }
++  odb::Rect access_box;
++  boundary_bbox.bloat(access_margin, access_box);
++  frRegionQuery::Objects<frBlockObject> nearby;
++  for (int layer = min_layer_num; layer <= last_access_layer; ++layer) {
++    design_->getRegionQuery()->queryDRObj(access_box, layer, nearby);
++  }
++  for (const auto& [box, obj] : nearby) {
++    if (obj->typeId() == frcPathSeg || obj->typeId() == frcVia
++        || obj->typeId() == frcPatchWire) {
++      const auto* figure = static_cast<frConnFig*>(obj);
++      if (figure->hasNet() && figure->getNet()->isFixed()) {
++        ndr_inst = inst;
++        break;
++      }
++    }
++  }
+   std::set<frTerm*> stubborn_terms;
+   for (auto& term : inst->getInstTerms()) {
+     if (term->isStubborn()) {
+diff --git a/src/drt/test/BUILD b/src/drt/test/BUILD
+--- a/src/drt/test/BUILD
++++ b/src/drt/test/BUILD
+@@ -29,6 +29,7 @@
+ 
+ # From CMakeLists.txt or_integration_tests(PASSFAIL_TESTS
+ PASSFAIL_TESTS = [
++    "fixed_wire_pin_access",
+ ]
+ 
+ ALL_TESTS = COMPULSORY_TESTS + PASSFAIL_TESTS
+@@ -100,7 +101,9 @@
+ [
+     filegroup(
+         name = test_name + "_resources",
+-        srcs = [":regression_resources"] + glob(
++        srcs = [":regression_resources"] + ([
++            "//src/psm/test:asap7_pin_access_lefs",
++        ] if test_name == "fixed_wire_pin_access" else []) + glob(
+             [
+                 test_name + ".*",
+             ],
+@@ -119,6 +122,7 @@
+         name = test_name,
+         size = "large" if test_name in BIG_TESTS else "small",
+         check_passfail = True if test_name in PASSFAIL_TESTS else False,
++        check_log = test_name != "fixed_wire_pin_access",
+         data = [":" + test_name + "_resources"],
+         visibility = ["//visibility:public"],
+     )
+diff --git a/src/psm/test/BUILD b/src/psm/test/BUILD
+--- a/src/psm/test/BUILD
++++ b/src/psm/test/BUILD
+@@ -194,3 +194,12 @@
+     ],
+     visibility = ["//visibility:public"],
+ )
++
++filegroup(
++    name = "asap7_pin_access_lefs",
++    srcs = [
++        "asap7/asap7_tech_1x_201209.lef",
++        "asap7/asap7sc7p5t_28_R_1x_220121a.lef",
++    ],
++    visibility = ["//src/drt/test:__pkg__"],
++)
+diff --git a/src/drt/test/CMakeLists.txt b/src/drt/test/CMakeLists.txt
+--- a/src/drt/test/CMakeLists.txt
++++ b/src/drt/test/CMakeLists.txt
+@@ -16,6 +16,7 @@
+     top_level_term2
+     via_access_layer
+   PASSFAIL_TESTS
++    fixed_wire_pin_access
+     cpp_tests
+ )
+ 
+diff --git a/src/drt/test/fixed_wire_pin_access.def b/src/drt/test/fixed_wire_pin_access.def
+--- /dev/null
++++ b/src/drt/test/fixed_wire_pin_access.def
+@@ -0,0 +1,59 @@
++VERSION 5.8 ;
++DIVIDERCHAR "." ;
++BUSBITCHARS "[]" ;
++DESIGN access ;
++UNITS DISTANCE MICRONS 1000 ;
++DIEAREA ( 0 0 ) ( 10000 10000 ) ;
++GCELLGRID X 0 DO 11 STEP 1000 ;
++GCELLGRID Y 0 DO 11 STEP 1000 ;
++TRACKS X 116 DO 161 STEP 80 LAYER Pad ;
++TRACKS Y 116 DO 168 STEP 80 LAYER Pad ;
++TRACKS X 116 DO 161 STEP 80 LAYER M9 ;
++TRACKS Y 116 DO 168 STEP 80 LAYER M9 ;
++TRACKS X 116 DO 161 STEP 80 LAYER M8 ;
++TRACKS Y 116 DO 168 STEP 80 LAYER M8 ;
++TRACKS X 16 DO 203 STEP 64 LAYER M7 ;
++TRACKS Y 16 DO 211 STEP 64 LAYER M7 ;
++TRACKS X 60 DO 269 STEP 48 LAYER M6 ;
++TRACKS Y 16 DO 211 STEP 64 LAYER M6 ;
++TRACKS X 12 DO 270 STEP 48 LAYER M5 ;
++TRACKS Y 12 DO 281 STEP 48 LAYER M5 ;
++TRACKS X 45 DO 359 STEP 36 LAYER M4 ;
++TRACKS Y 12 DO 281 STEP 48 LAYER M4 ;
++TRACKS X 9 DO 360 STEP 36 LAYER M3 ;
++TRACKS Y 9 DO 375 STEP 36 LAYER M3 ;
++TRACKS X 9 DO 360 STEP 36 LAYER M2 ;
++TRACKS Y 45 DO 50 STEP 270 LAYER M2 ;
++TRACKS X 9 DO 360 STEP 36 LAYER M2 ;
++TRACKS Y 81 DO 50 STEP 270 LAYER M2 ;
++TRACKS X 9 DO 360 STEP 36 LAYER M2 ;
++TRACKS Y 117 DO 50 STEP 270 LAYER M2 ;
++TRACKS X 9 DO 360 STEP 36 LAYER M2 ;
++TRACKS Y 153 DO 50 STEP 270 LAYER M2 ;
++TRACKS X 9 DO 360 STEP 36 LAYER M2 ;
++TRACKS Y 189 DO 50 STEP 270 LAYER M2 ;
++TRACKS X 9 DO 360 STEP 36 LAYER M2 ;
++TRACKS Y 225 DO 50 STEP 270 LAYER M2 ;
++TRACKS X 9 DO 360 STEP 36 LAYER M2 ;
++TRACKS Y 270 DO 49 STEP 270 LAYER M2 ;
++TRACKS X 9 DO 360 STEP 36 LAYER M1 ;
++TRACKS Y 9 DO 375 STEP 36 LAYER M1 ;
++COMPONENTS 2 ;
++- u0 BUFx2_ASAP7_75t_R + FIXED ( 1080 1080 ) N ;
++- u1 BUFx2_ASAP7_75t_R + FIXED ( 2160 1080 ) N ;
++END COMPONENTS
++PINS 2 ;
++- p0 + NET obstacle + DIRECTION INPUT + USE SIGNAL
++ + LAYER M2 ( -9 -9 ) ( 9 9 ) + FIXED ( 909 1161 ) N ;
++- p1 + NET obstacle + DIRECTION OUTPUT + USE SIGNAL
++ + LAYER M2 ( -9 -9 ) ( 9 9 ) + FIXED ( 1197 1161 ) N ;
++END PINS
++NETS 5 ;
++- n0 ( u0 A ) ;
++- n1 ( u0 Y ) ;
++- obstacle ( PIN p0 ) ( PIN p1 ) + USE SIGNAL
++ + FIXED M2 ( 909 1161 0 ) ( 1197 1161 0 ) ;
++- n2 ( u1 A ) ;
++- n3 ( u1 Y ) ;
++END NETS
++END DESIGN
+diff --git a/src/drt/test/fixed_wire_pin_access.tcl b/src/drt/test/fixed_wire_pin_access.tcl
+--- /dev/null
++++ b/src/drt/test/fixed_wire_pin_access.tcl
+@@ -0,0 +1,36 @@
++# A fixed M2 trace blocks two upward accesses on u0, but not on u1.
++# Both instances otherwise have the same master, orientation and track offsets.
++read_lef "../../psm/test/asap7/asap7_tech_1x_201209.lef"
++read_lef "../../psm/test/asap7/asap7sc7p5t_28_R_1x_220121a.lef"
++read_def "fixed_wire_pin_access.def"
++set_routing_layers -signal M2-M7
++pin_access -min_access_points 10000 -via_in_pin_bottom_layer M1 -via_in_pin_top_layer M1
++set block [ord::get_db_block]
++set u0 [$block findInst u0]
++set u1 [$block findInst u1]
++if {[$u0 getPinAccessIdx] == [$u1 getPinAccessIdx]} {
++  error "Fixed-wire environment incorrectly shares a pin-access pattern"
++}
++set counts [dict create]
++foreach ap [$block getAccessPoints] {
++  set mpin [$ap getMPin]
++  if {$mpin == "NULL" || ![$ap hasAccess UP]} { continue }
++  set key [list [[$mpin getMTerm] getName] [$ap getPoint]]
++  dict incr counts $key
++}
++foreach point {{45 81} {27 81}} {
++  if {[dict get $counts [list A $point]] != 1} {
++    error "Blocked access must exist only for the clear instance: $point"
++  }
++}
++foreach point {{45 189} {27 117} {27 153} {27 189}} {
++  if {[dict get $counts [list A $point]] != 2} {
++    error "Unaffected access lost: $point"
++  }
++}
++foreach point {{225 45} {225 225} {243 45} {243 81} {243 117} {243 153} {243 189} {243 225}} {
++  if {[dict get $counts [list Y $point]] != 2} {
++    error "Unaffected output access lost: $point"
++  }
++}
++puts "pass"

@@ -1,0 +1,28 @@
+diff --git a/src/psm/src/shape.cpp b/src/psm/src/shape.cpp
+--- a/src/psm/src/shape.cpp
++++ b/src/psm/src/shape.cpp
+@@ -13,6 +13,7 @@
+ #include <stdexcept>
+ #include <string>
+ #include <utility>
++#include <unordered_set>
+ #include <vector>
+ 
+ #include "boost/geometry/geometry.hpp"
+@@ -39,10 +40,14 @@
+ {
+   Connections shape_connections;
+ 
+-  Node::NodeSet used;
+-
+   const auto sorted_nodes = getNodes(layer_nodes);
+   const auto tree = getNodeTree(sorted_nodes);
++
++  // getNodes has already deduplicated Node::Compare-equivalent entries.
++  // The tree contains only these pointers; used is membership-only, so a
++  // pointer hash preserves every predicate result and nearest-neighbor tie.
++  std::unordered_set<Node*> used;
++  used.reserve(sorted_nodes.size());
+ 
+   for (auto* node : sorted_nodes) {
+     const auto& pt = node->getPoint();

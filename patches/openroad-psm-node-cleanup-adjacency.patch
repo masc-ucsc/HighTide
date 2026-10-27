@@ -1,0 +1,210 @@
+diff --git a/src/psm/src/node.h b/src/psm/src/node.h
+--- a/src/psm/src/node.h
++++ b/src/psm/src/node.h
+@@ -26,6 +26,8 @@
+ 
+ namespace psm {
+ class Shape;
++class Connection;
++class IRNetwork;
+ 
+ class Node
+ {
+@@ -74,6 +76,11 @@
+   virtual int getTypeCompareInfo() const { return 0; };
+ 
+  private:
++  friend class IRNetwork;
++
++  // Temporary adjacency during network cleanup; released after merging.
++  std::vector<Connection*> cleanup_connections_;
++
+   double getDBUs() const;
+ 
+   odb::Point pt_;
+diff --git a/src/psm/src/ir_network.h b/src/psm/src/ir_network.h
+--- a/src/psm/src/ir_network.h
++++ b/src/psm/src/ir_network.h
+@@ -132,8 +132,8 @@
+   void generateTopLayerFillerNodes();
+   void sortNodes();
+   void cleanupNodes();
+-  void cleanupOverlappingNodes(NodePtrMap<Connection>& connection_map);
+-  void mergeNodes(NodePtrMap<Connection>& connection_map);
++  void cleanupOverlappingNodes();
++  void mergeNodes();
+ 
+   void connectLayerNodes();
+   void cleanupConnections();
+@@ -143,13 +143,12 @@
+ 
+   void removeNodes(std::set<Node*>& removes,
+                    odb::dbTechLayer* layer,
+-                   std::vector<std::unique_ptr<Node>>& nodes,
+-                   const NodePtrMap<Connection>& connection_map);
++                   std::vector<std::unique_ptr<Node>>& nodes);
+   void removeConnections(std::set<Connection*>& removes);
+ 
+   int getEffectiveNumberOfCuts(const odb::dbShape& shape) const;
+ 
+-  void copy(Node* keep, Node* remove, NodePtrMap<Connection>& connection_map);
++  void copy(Node* keep, Node* remove);
+ 
+   std::set<Node*> getSharedShapeNodes() const;
+ 
+diff --git a/src/psm/src/ir_network.cpp b/src/psm/src/ir_network.cpp
+--- a/src/psm/src/ir_network.cpp
++++ b/src/psm/src/ir_network.cpp
+@@ -776,7 +776,7 @@
+   return shared_nodes;
+ }
+ 
+-void IRNetwork::mergeNodes(NodePtrMap<Connection>& connection_map)
++void IRNetwork::mergeNodes()
+ {
+   const utl::DebugScopedTimer timer(
+       logger_, utl::PSM, "timer", 1, "Merging nodes: {}");
+@@ -802,7 +802,7 @@
+       const auto shape_remove = shape->cleanupNodes(
+           min_distance,
+           node_trees,
+-          [&](Node* keep, Node* remove) { copy(keep, remove, connection_map); },
++          [&](Node* keep, Node* remove) { copy(keep, remove); },
+           shared_nodes);
+       removes.insert(shape_remove.begin(), shape_remove.end());
+     }
+@@ -831,7 +831,7 @@
+                "Identified {} nodes to be merged on {}",
+                layer_remove.size(),
+                layer->getName());
+-    removeNodes(layer_remove, layer, nodes_[layer], connection_map);
++    removeNodes(layer_remove, layer, nodes_[layer]);
+   }
+ 
+   recoverMemory();
+@@ -919,7 +919,7 @@
+   return mapping;
+ }
+ 
+-void IRNetwork::cleanupOverlappingNodes(NodePtrMap<Connection>& connection_map)
++void IRNetwork::cleanupOverlappingNodes()
+ {
+   const utl::DebugScopedTimer timer(
+       logger_, utl::PSM, "timer", 1, "Cleanup overlapping nodes: {}");
+@@ -933,7 +933,7 @@
+     for (std::advance(node, 1); node != nodes.end();) {
+       const odb::Point& pt = (*node)->getPoint();
+       if (pt == prev_node->getPoint()) {
+-        copy(prev_node, node->get(), connection_map);
++        copy(prev_node, node->get());
+         removes.insert(node->get());
+       } else {
+         prev_node = node->get();
+@@ -948,7 +948,7 @@
+                "Identified overlapping nodes on {}: {}",
+                layer->getName(),
+                removes.size());
+-    removeNodes(removes, layer, nodes, connection_map);
++    removeNodes(removes, layer, nodes);
+   }
+ }
+ 
+@@ -957,19 +957,46 @@
+   const utl::DebugScopedTimer timer(
+       logger_, utl::PSM, "timer", 1, "Cleanup nodes: {}");
+ 
+-  auto node_connection_map = getConnectionMap();
+-
+-  cleanupOverlappingNodes(node_connection_map);
+-
+-  mergeNodes(node_connection_map);
+-
++  // Keep adjacency on the nodes instead of allocating a tree-map entry
++  // for every via-cut node. Preserve connection insertion and merge order.
++  const auto visit_nodes = [&](auto&& visit) {
++    for (auto& [layer, nodes] : nodes_) {
++      for (auto& node : nodes) {
++        visit(*node);
++      }
++    }
++    for (auto& node : iterm_nodes_) {
++      visit(*node);
++    }
++    for (auto& node : bpin_nodes_) {
++      visit(*node);
++    }
++  };
++  const auto release = [&]() {
++    visit_nodes([](Node& node) {
++      std::vector<Connection*>().swap(node.cleanup_connections_);
++    });
++  };
++  release();
++  try {
++    for (const auto& conn : connections_) {
++      conn->getNode0()->cleanup_connections_.push_back(conn.get());
++      conn->getNode1()->cleanup_connections_.push_back(conn.get());
++    }
++    visit_nodes([](Node& node) { node.cleanup_connections_.shrink_to_fit(); });
++    cleanupOverlappingNodes();
++    mergeNodes();
++  } catch (...) {
++    release();
++    throw;
++  }
++  release();
+   recoverMemory();
+ }
+ 
+ void IRNetwork::removeNodes(std::set<Node*>& removes,
+                             odb::dbTechLayer* layer,
+-                            std::vector<std::unique_ptr<Node>>& nodes,
+-                            const NodePtrMap<Connection>& connection_map)
++                            std::vector<std::unique_ptr<Node>>& nodes)
+ {
+   if (removes.empty()) {
+     return;
+@@ -986,12 +1013,7 @@
+ 
+   // remove connections
+   for (auto* node : removes) {
+-    auto find_conn = connection_map.find(node);
+-    if (find_conn == connection_map.end()) {
+-      continue;
+-    }
+-
+-    for (auto* conn : find_conn->second) {
++    for (auto* conn : node->cleanup_connections_) {
+       conn->changeNode(node, nullptr);
+     }
+   }
+@@ -1205,24 +1227,17 @@
+   logger_->report("Total connections: {}", connections_.size());
+ }
+ 
+-void IRNetwork::copy(Node* keep,
+-                     Node* remove,
+-                     NodePtrMap<Connection>& connection_map)
+-{
+-  // change connections
+-  auto& remove_connections = connection_map[remove];
++void IRNetwork::copy(Node* keep, Node* remove)
++{
++  auto& remove_connections = remove->cleanup_connections_;
+   for (auto* conn : remove_connections) {
+     conn->changeNode(remove, keep);
+   }
+-  // update connection map
+-  auto& keep_connections = connection_map[keep];
++  auto& keep_connections = keep->cleanup_connections_;
+   keep_connections.insert(keep_connections.end(),
+                           remove_connections.begin(),
+                           remove_connections.end());
+-  // The removed node now has no incident connections. Keep no empty map
+-  // entry: dense via arrays can merge millions of nodes before cleanup ends.
+-  // Later lookups treat an absent entry exactly like an empty connection list.
+-  connection_map.erase(remove);
++  std::vector<Connection*>().swap(remove_connections);
+ }
+ 
+ void IRNetwork::dumpNodes(const std::map<Node*, std::size_t>& node_map,

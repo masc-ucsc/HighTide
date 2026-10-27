@@ -1,0 +1,40 @@
+diff --git a/src/grt/src/fastroute/include/Graph2D.h b/src/grt/src/fastroute/include/Graph2D.h
+--- a/src/grt/src/fastroute/include/Graph2D.h
++++ b/src/grt/src/fastroute/include/Graph2D.h
+@@ -68,8 +68,14 @@
+   double getEstUsageV(int x, int y) const;
+   uint16_t getUsageRedH(int x, int y) const;
+   uint16_t getUsageRedV(int x, int y) const;
+-  double getEstUsageRedH(int x, int y) const;
+-  double getEstUsageRedV(int x, int y) const;
++  double getEstUsageRedH(int x, int y) const
++  {
++    return h_edges_[x][y].est_usage_red();
++  }
++  double getEstUsageRedV(int x, int y) const
++  {
++    return v_edges_[x][y].est_usage_red();
++  }
+   int getOverflowH(int x, int y) const;
+   int getOverflowV(int x, int y) const;
+   uint16_t getCapH(int x, int y) const;
+diff --git a/src/grt/src/fastroute/src/graph2d.cpp b/src/grt/src/fastroute/src/graph2d.cpp
+--- a/src/grt/src/fastroute/src/graph2d.cpp
++++ b/src/grt/src/fastroute/src/graph2d.cpp
+@@ -194,16 +194,6 @@
+ uint16_t Graph2D::getUsageRedV(const int x, const int y) const
+ {
+   return v_edges_[x][y].usage_red();
+-}
+-
+-double Graph2D::getEstUsageRedH(const int x, const int y) const
+-{
+-  return h_edges_[x][y].est_usage_red();
+-}
+-
+-double Graph2D::getEstUsageRedV(const int x, const int y) const
+-{
+-  return v_edges_[x][y].est_usage_red();
+ }
+ 
+ int Graph2D::getOverflowH(const int x, const int y) const

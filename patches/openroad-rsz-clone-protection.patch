@@ -1,0 +1,143 @@
+diff --git a/src/rsz/src/move/CloneCandidate.cc b/src/rsz/src/move/CloneCandidate.cc
+--- a/src/rsz/src/move/CloneCandidate.cc
++++ b/src/rsz/src/move/CloneCandidate.cc
+@@ -133,6 +133,31 @@
+ 
+ MoveResult CloneCandidate::applyClone()
+ {
++  // Cloning changes more than the output net: each cloned input adds a
++  // terminal to its original net, and moved loads must be reconnectable.
++  // Check the complete edit before creating any instance or net. A candidate
++  // can outlive its generation, so recheck protection at application time.
++  if (resizer_.dontTouch(drvr_inst_)
++      || !resizer_.okToBufferNet(drvr_pin_)) {
++    return rejectedMove();
++  }
++  std::unique_ptr<sta::InstancePinIterator> input_iter{
++      resizer_.network()->pinIterator(drvr_inst_)};
++  while (input_iter->hasNext()) {
++    sta::Pin* pin = input_iter->next();
++    if (resizer_.network()->direction(pin)->isInput()) {
++      odb::dbNet* net = resizer_.dbNetwork()->flatNet(pin);
++      if (net != nullptr && net->isDoNotTouch()) {
++        return rejectedMove();
++      }
++    }
++  }
++  for (sta::Pin* load : moved_loads_) {
++    if (resizer_.dontTouch(load)) {
++      return rejectedMove();
++    }
++  }
++
+   clone_inst_
+       = resizer_.makeInstance(clone_cell_, "clone", parent_, clone_loc_);
+   if (clone_inst_ == nullptr) {
+diff --git a/src/rsz/test/BUILD b/src/rsz/test/BUILD
+--- a/src/rsz/test/BUILD
++++ b/src/rsz/test/BUILD
+@@ -318,6 +318,17 @@
+     for test_name in ALL_TESTS
+ ]
+ 
++# Exercise both successful cloning and rejected protected topology edits.
++[
++    regression_test(
++        name = "repair_setup_clone_protection_" + case,
++        check_log = False,
++        check_passfail = True,
++        data = [":test_resources"],
++    )
++    for case in ["baseline", "input", "driver", "loads", "output"]
++]
++
+ test_suite(
+     name = "cpp_tests",
+     tests = [
+diff --git a/src/rsz/test/clone_protection_common.tcl b/src/rsz/test/clone_protection_common.tcl
+--- /dev/null
++++ b/src/rsz/test/clone_protection_common.tcl
+@@ -0,0 +1,53 @@
++try {
++# Probe CloneMove vs CloneGenerator/Candidate behavior on high-fanout net.
++source "helpers.tcl"
++source "hi_fanout.tcl"
++set def_filename [make_result_file "move_diff_clone.def"]
++write_clone_test_def $def_filename NAND2_X4 30
++read_liberty Nangate45/Nangate45_typ.lib
++read_lef Nangate45/Nangate45.lef
++read_def $def_filename
++create_clock -period 0.1 clk1
++set_driving_cell -lib_cell BUF_X1 [all_inputs]
++set_max_fanout 200 [current_design]
++source Nangate45/Nangate45.vars
++source Nangate45/Nangate45.rc
++set_wire_rc -layer metal2
++estimate_parasitics -placement
++set_wire_rc -signal -layer $wire_rc_layer
++set_wire_rc -clock -layer $wire_rc_layer_clk
++set_dont_use $dont_use
++estimate_parasitics -placement
++report_worst_slack -max
++
++set block [ord::get_db_block]
++switch $::clone_protection_case {
++ input {set_dont_touch [get_nets clk_to_nand0]}
++ driver {set_dont_touch [get_cells nand_inst_0]}
++ loads {set_dont_touch [get_cells load*]}
++ output {set_dont_touch [get_nets net0]}
++ baseline {}
++ default {error "invalid case"}
++}
++proc topology {} {
++ set b [ord::get_db_block];set cells {};set nets {}
++ foreach i [$b getInsts] {lappend cells [list [$i getName] [[$i getMaster] getName] [$i getLocation] [$i isDoNotTouch]]}
++ foreach n [$b getNets] {
++  set pins {}
++  foreach pin [$n getITerms] {lappend pins [list [[$pin getInst] getName] [[$pin getMTerm] getName]]}
++  foreach pin [$n getBTerms] {lappend pins [list PORT [$pin getName]]}
++  lappend nets [list [$n getName] [lsort $pins] [$n isDoNotTouch]]
++ }
++ return [list [lsort $cells] [lsort $nets]]
++}
++set before [topology]
++set count [llength [$block getInsts]]
++repair_timing -setup -sequence "clone" -skip_last_gasp -repair_tns 100 -max_passes 20 -verbose
++set added [expr {[llength [$block getInsts]]-$count}]
++if {$::clone_protection_case eq "baseline"} {
++ if {$added <= 0} {error "control did not exercise cloning"}
++} elseif {[topology] ne $before} {error "rejected clone changed protected topology"}
++puts "pass"
++
++} on error {message opts} {puts stderr "$message\n[dict get $opts -errorinfo]";exit 1}
++exit 0
+diff --git a/src/rsz/test/repair_setup_clone_protection_baseline.tcl b/src/rsz/test/repair_setup_clone_protection_baseline.tcl
+--- /dev/null
++++ b/src/rsz/test/repair_setup_clone_protection_baseline.tcl
+@@ -0,0 +1,2 @@
++set ::clone_protection_case baseline
++source "clone_protection_common.tcl"
+diff --git a/src/rsz/test/repair_setup_clone_protection_input.tcl b/src/rsz/test/repair_setup_clone_protection_input.tcl
+--- /dev/null
++++ b/src/rsz/test/repair_setup_clone_protection_input.tcl
+@@ -0,0 +1,2 @@
++set ::clone_protection_case input
++source "clone_protection_common.tcl"
+diff --git a/src/rsz/test/repair_setup_clone_protection_driver.tcl b/src/rsz/test/repair_setup_clone_protection_driver.tcl
+--- /dev/null
++++ b/src/rsz/test/repair_setup_clone_protection_driver.tcl
+@@ -0,0 +1,2 @@
++set ::clone_protection_case driver
++source "clone_protection_common.tcl"
+diff --git a/src/rsz/test/repair_setup_clone_protection_loads.tcl b/src/rsz/test/repair_setup_clone_protection_loads.tcl
+--- /dev/null
++++ b/src/rsz/test/repair_setup_clone_protection_loads.tcl
+@@ -0,0 +1,2 @@
++set ::clone_protection_case loads
++source "clone_protection_common.tcl"
+diff --git a/src/rsz/test/repair_setup_clone_protection_output.tcl b/src/rsz/test/repair_setup_clone_protection_output.tcl
+--- /dev/null
++++ b/src/rsz/test/repair_setup_clone_protection_output.tcl
+@@ -0,0 +1,2 @@
++set ::clone_protection_case output
++source "clone_protection_common.tcl"

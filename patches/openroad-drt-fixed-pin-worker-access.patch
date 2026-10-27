@@ -1,0 +1,33 @@
+--- a/src/drt/src/dr/FlexDR_init.cpp
++++ b/src/drt/src/dr/FlexDR_init.cpp
+@@ -1254,6 +1254,7 @@
+   auto dPin = std::make_unique<drPin>();
+   dPin->setFrTerm(term);
+   int pinIdx = 0;
++  bool hasOutsideAccessPoint = false;
+   const int pinAccessIdx = (inst) ? inst->getPinAccessIdx() : 0;
+   for (auto& pin : trueTerm->getPins()) {
+     frAccessPoint* prefAp = nullptr;
+@@ -1297,12 +1298,22 @@
+       }
+       if (getRouteBox().intersects(bp)) {
+         dPin->addAccessPattern(std::move(dAp));
++      } else {
++        hasOutsideAccessPoint = true;
+       }
+     }
+     pinIdx++;
+   }
+ 
+   if (dPin->getAccessPatterns().empty()) {
++    // A worker can clip a fixed pin's shape without containing any of its
++    // access points. Fixed nets cannot be ripped up, so they do not need a
++    // routable local pin here. Keep the registered frNet term and route
++    // figures for geometry/DRC; do not manufacture an access point or hide
++    // a pin that has no access points anywhere.
++    if (dNet->getFrNet()->isFixed() && hasOutsideAccessPoint) {
++      return;
++    }
+     logger_->error(DRT, 1231, "Pin {} does not have access point", name);
+   }
+   dPin->setId(pinCnt_++);

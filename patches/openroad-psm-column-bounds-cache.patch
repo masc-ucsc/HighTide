@@ -1,0 +1,135 @@
+diff --git a/src/psm/src/shape.h b/src/psm/src/shape.h
+--- a/src/psm/src/shape.h
++++ b/src/psm/src/shape.h
+@@ -34,9 +34,18 @@
+       int max_distance,
+       const IRNetwork::NodeTree& layer_nodes);
+   Connections connectNodes(const IRNetwork::NodeTree& layer_nodes);
++  struct NodeColumn
++  {
++    int x;
++    std::size_t begin;
++    std::size_t end;
++  };
++  static std::vector<NodeColumn> indexNodeColumns(
++      const std::vector<std::unique_ptr<Node>>& nodes);
+   std::set<Node*> cleanupNodes(
+       int min_distance,
+       const std::vector<std::unique_ptr<Node>>& layer_nodes,
++      const std::vector<NodeColumn>& columns,
+       const std::function<void(Node*, Node*)>& copy_func,
+       const std::set<Node*>& shared_nodes,
+       const IRNetwork::NodeTree* reference = nullptr);
+@@ -64,7 +73,8 @@
+ 
+   std::vector<Node*> getNodes(const IRNetwork::NodeTree& layer_nodes) const;
+   std::vector<Node*> getNodes(
+-      const std::vector<std::unique_ptr<Node>>& layer_nodes) const;
++      const std::vector<std::unique_ptr<Node>>& layer_nodes,
++      const std::vector<NodeColumn>& columns) const;
+   IRNetwork::NodeTree getNodeTree(const std::vector<Node*>& nodes) const;
+ 
+   NodeDataTree createNodeDataValue(
+diff --git a/src/psm/src/shape.cpp b/src/psm/src/shape.cpp
+--- a/src/psm/src/shape.cpp
++++ b/src/psm/src/shape.cpp
+@@ -148,31 +148,42 @@
+   return IRNetwork::NodeTree(nodes.begin(), nodes.end());
+ }
+ 
++std::vector<Shape::NodeColumn> Shape::indexNodeColumns(
++    const std::vector<std::unique_ptr<Node>>& nodes)
++{
++  std::vector<NodeColumn> columns;
++  for (std::size_t i = 0; i < nodes.size(); ++i) {
++    const int x = nodes[i]->getPoint().x();
++    if (columns.empty() || columns.back().x != x) {
++      columns.push_back({x, i, i + 1});
++    } else {
++      columns.back().end = i + 1;
++    }
++  }
++  return columns;
++}
++
+ std::vector<Node*> Shape::getNodes(
+-    const std::vector<std::unique_ptr<Node>>& layer_nodes) const
+-{
+-  // sortNodes and overlap cleanup leave each layer ordered by x then y.
+-  // Select inclusive rectangle intersections without a layer-wide R-tree.
++    const std::vector<std::unique_ptr<Node>>& layer_nodes,
++    const std::vector<NodeColumn>& columns) const
++{
++  // The layer is immutable until all shapes have copied connectivity. Reuse
++  // column bounds instead of rediscovering each end in the full node vector.
+   std::vector<Node*> nodes;
+   auto column = std::lower_bound(
+-      layer_nodes.begin(), layer_nodes.end(), shape_.xMin(),
+-      [](const auto& node, int x) { return node->getPoint().x() < x; });
+-  while (column != layer_nodes.end()
+-         && (*column)->getPoint().x() <= shape_.xMax()) {
+-    const int x = (*column)->getPoint().x();
+-    const auto next = std::upper_bound(
+-        column, layer_nodes.end(), x,
+-        [](int value, const auto& node) { return value < node->getPoint().x(); });
++      columns.begin(), columns.end(), shape_.xMin(),
++      [](const NodeColumn& col, int x) { return col.x < x; });
++  for (; column != columns.end() && column->x <= shape_.xMax(); ++column) {
++    const auto begin = layer_nodes.begin() + column->begin;
++    const auto end = layer_nodes.begin() + column->end;
+     auto node = std::lower_bound(
+-        column, next, shape_.yMin(),
++        begin, end, shape_.yMin(),
+         [](const auto& value, int y) { return value->getPoint().y() < y; });
+-    for (; node != next && (*node)->getPoint().y() <= shape_.yMax(); ++node) {
+-      // Match the ordered-set query's comparator-equivalence deduplication.
++    for (; node != end && (*node)->getPoint().y() <= shape_.yMax(); ++node) {
+       if (nodes.empty() || nodes.back()->compare(node->get()) != 0) {
+         nodes.push_back(node->get());
+       }
+     }
+-    column = next;
+   }
+   return nodes;
+ }
+@@ -180,12 +191,13 @@
+ std::set<Node*> Shape::cleanupNodes(
+     int min_distance,
+     const std::vector<std::unique_ptr<Node>>& layer_nodes,
++    const std::vector<NodeColumn>& columns,
+     const std::function<void(Node*, Node*)>& copy_func,
+     const std::set<Node*>& shared_nodes,
+     const IRNetwork::NodeTree* reference)
+ {
+   // Process and filter nodes
+-  const auto sorted_nodes = getNodes(layer_nodes);
++  const auto sorted_nodes = getNodes(layer_nodes, columns);
+   if (reference && sorted_nodes != getNodes(*reference)) {
+     throw std::logic_error("PSM sorted-column/R-tree node query mismatch");
+   }
+diff --git a/src/psm/src/ir_network.cpp b/src/psm/src/ir_network.cpp
+--- a/src/psm/src/ir_network.cpp
++++ b/src/psm/src/ir_network.cpp
+@@ -863,6 +863,12 @@
+                layer->getName(),
+                shapes.size());
+ 
++    const auto layer_nodes = nodes_.find(layer);
++    if (layer_nodes == nodes_.end() || layer_nodes->second.empty()) {
++      // Shapes without nodes have no connectivity to merge.
++      continue;
++    }
++    const auto columns = Shape::indexNodeColumns(layer_nodes->second);
+     std::unique_ptr<NodeTree> reference;
+     if (logger_->debugCheck(utl::PSM, "cleanup_node_columns", 1)) {
+       reference = std::make_unique<NodeTree>(getNodeTree(layer));
+@@ -873,7 +879,8 @@
+                                    : min_node_pitch_[shape->getLayer()];
+       const auto shape_remove = shape->cleanupNodes(
+           min_distance,
+-          nodes_.at(layer),
++          layer_nodes->second,
++          columns,
+           [&](Node* keep, Node* remove) { copy(keep, remove); },
+           shared_nodes,
+           reference.get());

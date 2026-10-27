@@ -1,0 +1,70 @@
+diff --git a/src/dpl/src/Place.cpp b/src/dpl/src/Place.cpp
+--- a/src/dpl/src/Place.cpp
++++ b/src/dpl/src/Place.cpp
+@@ -18,6 +18,8 @@
+ #include <unordered_set>
+ #include <vector>
+ 
++#include "absl/container/flat_hash_set.h"
++#include "absl/hash/hash.h"
+ #include "PlacementDRC.h"
+ #include "boost/geometry/geometry.hpp"
+ #include "boost/random/uniform_int_distribution.hpp"
+@@ -890,7 +892,10 @@
+   };
+   std::priority_queue<PQ_entry, std::vector<PQ_entry>, std::greater<PQ_entry>>
+       positionsHeap;
+-  std::unordered_set<GridPt> visited;
++  const auto point_hash = [](const GridPt& p) {
++    return absl::HashOf(p.x.v, p.y.v);
++  };
++  absl::flat_hash_set<GridPt, decltype(point_hash)> visited;
+   int sequence = 0;
+   GridPt center{x, y};
+   positionsHeap.push(
+@@ -913,17 +918,16 @@
+     // Put neighbors in the queue
+     for (GridPt offset : neighbors) {
+       GridPt neighbor = {nearest.x + offset.x, nearest.y + offset.y};
+-      // Check if it was already put in the queue
+-      if (visited.contains(neighbor)) {
+-        continue;
+-      }
+       // Check limits
+       if (neighbor.x < x_min || neighbor.x > x_max || neighbor.y < y_min
+           || neighbor.y > y_max) {
+         continue;
+       }
+ 
+-      visited.insert(neighbor);
++      // Membership only: queue order remains determined by distance/sequence.
++      if (!visited.insert(neighbor).second) {
++        continue;
++      }
+       positionsHeap.push({.manhattan_distance = calcDist(center, neighbor),
+                           .p = neighbor,
+                           .sequence = sequence++});
+diff --git a/src/dpl/BUILD b/src/dpl/BUILD
+--- a/src/dpl/BUILD
++++ b/src/dpl/BUILD
+@@ -105,6 +105,8 @@
+     ],
+     deps = [
+         ":dpl_private_hdrs",
++        "@abseil-cpp//absl/container:flat_hash_set",
++        "@abseil-cpp//absl/hash",
+         "//src/odb/src/db",
+         "//src/utl",
+         "@boost.format",
+diff --git a/src/dpl/CMakeLists.txt b/src/dpl/CMakeLists.txt
+--- a/src/dpl/CMakeLists.txt
++++ b/src/dpl/CMakeLists.txt
+@@ -54,6 +54,8 @@
+     odb
+   PRIVATE
+     utl_lib
++    absl::flat_hash_set
++    absl::hash
+ )
+ 
+ target_include_directories(dpl_lib

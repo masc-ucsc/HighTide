@@ -1,0 +1,32 @@
+diff --git a/src/drt/src/pa/FlexPA_acc_point.cpp b/src/drt/src/pa/FlexPA_acc_point.cpp
+--- a/src/drt/src/pa/FlexPA_acc_point.cpp
++++ b/src/drt/src/pa/FlexPA_acc_point.cpp
+@@ -1118,6 +1118,28 @@
+   design_rule_checker.main();
+ 
+   const bool no_drv = design_rule_checker.getMarkers().empty();
++  if (!no_drv && inst_term
++      && logger_->debugCheck(utl::DRT, "pin_access_via", 1)) {
++    for (const auto& marker : design_rule_checker.getMarkers()) {
++      const auto box = marker->getBBox();
++      debugPrint(logger_,
++                 utl::DRT,
++                 "pin_access_via",
++                 1,
++                 "pin={} point=({}, {}) via={} rule={} layer={} box=({}, {}, {}, {})",
++                 inst_term->getName(),
++                 point.x(),
++                 point.y(),
++                 via->getViaDef()->getName(),
++                 static_cast<int>(marker->getConstraint()->typeId()),
++                 marker->getLayerNum(),
++                 box.xMin(),
++                 box.yMin(),
++                 box.xMax(),
++                 box.yMax());
++    }
++  }
++
+ 
+   if (graphics_) {
+     graphics_->setViaAP(ap, via, design_rule_checker.getMarkers());

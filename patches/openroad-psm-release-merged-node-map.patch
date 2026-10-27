@@ -1,0 +1,16 @@
+diff --git a/src/psm/src/ir_network.cpp b/src/psm/src/ir_network.cpp
+--- a/src/psm/src/ir_network.cpp
++++ b/src/psm/src/ir_network.cpp
+@@ -1245,8 +1245,10 @@
+   keep_connections.insert(keep_connections.end(),
+                           remove_connections.begin(),
+                           remove_connections.end());
+-  remove_connections.clear();
+-  remove_connections.shrink_to_fit();
++  // The removed node now has no incident connections. Keep no empty map
++  // entry: dense via arrays can merge millions of nodes before cleanup ends.
++  // Later lookups treat an absent entry exactly like an empty connection list.
++  connection_map.erase(remove);
+ }
+ 
+ void IRNetwork::dumpNodes(const std::map<Node*, std::size_t>& node_map,

@@ -1,0 +1,136 @@
+diff --git a/src/dpl/include/dpl/Opendp.h b/src/dpl/include/dpl/Opendp.h
+--- a/src/dpl/include/dpl/Opendp.h
++++ b/src/dpl/include/dpl/Opendp.h
+@@ -102,6 +102,8 @@
+ 
+   void legalCellPos(odb::dbInst* db_inst);  // call from rsz
+   void initMacrosAndGrid();                 // call from rsz
++  // Requires initMacrosAndGrid(); does not mutate the instance or grid.
++  bool canResizeCell(odb::dbInst* inst, odb::dbMaster* master) const;
+ 
+   // legalize/report
+   // max_displacment is in sites. use zero for defaults.
+diff --git a/src/dpl/src/Place.cpp b/src/dpl/src/Place.cpp
+--- a/src/dpl/src/Place.cpp
++++ b/src/dpl/src/Place.cpp
+@@ -1320,6 +1320,32 @@
+   return init;
+ }
+ 
++bool Opendp::canResizeCell(odb::dbInst* inst, odb::dbMaster* master) const
++{
++  odb::Rect bbox;
++  master->getPlacementBoundary(bbox);
++  inst->getTransform().apply(bbox);
++  bbox.moveDelta(-core_.xMin(), -core_.yMin());
++  const auto sites = grid_->gridCovering(bbox);
++  for (GridY y = sites.ylo; y < sites.yhi; ++y) {
++    for (GridX x = sites.xlo; x < sites.xhi; ++x) {
++      const Pixel* pixel = grid_->gridPixel(x, y);
++      if (pixel == nullptr || !pixel->is_valid) {
++        return false;
++      }
++      const Node* fixed = pixel->cell;
++      if (fixed && fixed->isFixed() && fixed->getDbInst() != inst) {
++        return false;
++      }
++      const Node* padding = pixel->padding_reserved_by;
++      if (padding && padding->getDbInst() != inst) {
++        return false;
++      }
++    }
++  }
++  return true;
++}
++
+ void Opendp::legalCellPos(odb::dbInst* db_inst)
+ {
+   Node cell;
+diff --git a/src/rsz/src/Resizer.cc b/src/rsz/src/Resizer.cc
+--- a/src/rsz/src/Resizer.cc
++++ b/src/rsz/src/Resizer.cc
+@@ -2999,6 +2999,14 @@
+ 
+   if (replacement_master) {
+     dbInst* dinst = db_network_->staToDb(inst);
++    // Incremental pin access runs before final detailed placement. A wider
++    // cell must not cover immutable endpoints or reserved routing corridors.
++    const auto parasitics_src = estimate_parasitics_->getParasiticsSrc();
++    if ((parasitics_src == est::ParasiticsSrc::kGlobalRouting
++         || parasitics_src == est::ParasiticsSrc::kDetailedRouting)
++        && !opendp_->canResizeCell(dinst, replacement_master)) {
++      return false;
++    }
+     dbMaster* master = dinst->getMaster();
+     designAreaIncr(-area(master));
+     sta::Cell* replacement_cell1 = db_network_->dbToSta(replacement_master);
+diff --git a/src/dpl/test/dpl_test.cc b/src/dpl/test/dpl_test.cc
+--- a/src/dpl/test/dpl_test.cc
++++ b/src/dpl/test/dpl_test.cc
+@@ -28,4 +28,66 @@
+   odb::dbBlock* block_;
+ };
+ 
++
++TEST(FixedResizeTest, RejectsInteriorFixedOverlapWithoutMutation)
++{
++  std::unique_ptr<odb::dbDatabase, decltype(&odb::dbDatabase::destroy)> db(
++      odb::dbDatabase::create(), &odb::dbDatabase::destroy);
++  utl::Logger logger;
++  auto* tech = odb::dbTech::create(db.get(), "tech");
++  auto* lib = odb::dbLib::create(db.get(), "lib", tech);
++  auto* site = odb::dbSite::create(lib, "site");
++  site->setWidth(10);
++  site->setHeight(100);
++  site->setClass(odb::dbSiteClass::CORE);
++  site->setSymmetryY();
++  auto make_master = [&](const char* name, int width) {
++    auto* master = odb::dbMaster::create(lib, name);
++    master->setWidth(width);
++    master->setHeight(100);
++    master->setType(odb::dbMasterType::CORE);
++    master->setSite(site);
++    master->setSymmetryX();
++    master->setSymmetryY();
++    master->setFrozen();
++    return master;
++  };
++  auto* small = make_master("small", 20);
++  auto* large = make_master("large", 80);
++  auto* chip = odb::dbChip::create(db.get(), tech);
++  auto* block = odb::dbBlock::create(chip, "top");
++  block->setDefUnits(1000);
++  block->setDieArea(odb::Rect(0, 0, 1000, 100));
++  block->setCoreArea(odb::Rect(0, 0, 1000, 100));
++  odb::dbRow::create(block, "row", site, 0, 0, odb::dbOrientType::R0,
++                     odb::dbRowDir::HORIZONTAL, 100, 10);
++  auto* cell = odb::dbInst::create(block, small, "resized");
++  cell->setLocation(100, 0);
++  cell->setPlacementStatus(odb::dbPlacementStatus::PLACED);
++  auto* fixed = odb::dbInst::create(block, small, "fixed");
++  fixed->setLocation(140, 0);
++  fixed->setPlacementStatus(odb::dbPlacementStatus::FIRM);
++  odb::dbBlockage::create(block, 500, 0, 520, 100);
++  Opendp dp(db.get(), &logger);
++  dp.initMacrosAndGrid();
++  EXPECT_TRUE(dp.canResizeCell(cell, small));
++  // The fixed cell is strictly inside the enlarged box, not at a corner.
++  EXPECT_FALSE(dp.canResizeCell(cell, large));
++  EXPECT_EQ(cell->getMaster(), small);
++  EXPECT_EQ(cell->getOrigin(), odb::Point(100, 0));
++  cell->setLocation(160, 0);  // Abutting the fixed cell is legal.
++  EXPECT_TRUE(dp.canResizeCell(cell, large));
++  cell->setOrient(odb::dbOrientType::MY);
++  cell->setLocation(160, 0);
++  EXPECT_FALSE(dp.canResizeCell(cell, large));
++  cell->setLocation(240, 0);
++  EXPECT_TRUE(dp.canResizeCell(cell, large));
++  cell->setOrient(odb::dbOrientType::R0);
++  cell->setLocation(460, 0);
++  EXPECT_TRUE(dp.canResizeCell(cell, small));
++  EXPECT_FALSE(dp.canResizeCell(cell, large));
++  cell->setLocation(970, 0);
++  EXPECT_FALSE(dp.canResizeCell(cell, large));
++}
++
+ }  // namespace dpl

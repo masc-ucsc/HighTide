@@ -1,0 +1,40 @@
+diff --git a/src/grt/src/fastroute/include/Graph2D.h b/src/grt/src/fastroute/include/Graph2D.h
+--- a/src/grt/src/fastroute/include/Graph2D.h
++++ b/src/grt/src/fastroute/include/Graph2D.h
+@@ -78,8 +78,14 @@
+                                       bool horizontal,
+                                       int limit,
+                                       int uniform_ndr_cost) const;
+-  int32_t getLastUsageH(int x, int y) const;
+-  int32_t getLastUsageV(int x, int y) const;
++  int32_t getLastUsageH(int x, int y) const
++  {
++    return h_edges_[x][y].last_usage;
++  }
++  int32_t getLastUsageV(int x, int y) const
++  {
++    return v_edges_[x][y].last_usage;
++  }
+   double getEstUsageH(int x, int y) const;
+   double getEstUsageV(int x, int y) const;
+   int32_t getUsageRedH(int x, int y) const
+diff --git a/src/grt/src/fastroute/src/graph2d.cpp b/src/grt/src/fastroute/src/graph2d.cpp
+--- a/src/grt/src/fastroute/src/graph2d.cpp
++++ b/src/grt/src/fastroute/src/graph2d.cpp
+@@ -196,16 +196,6 @@
+                           * (kNDROverflowCostMultiplier - 1) * uniform_ndr_cost;
+   const int64_t demand = int64_t(edge.usage) - penalty;
+   return demand >= 0 && demand <= limit;
+-}
+-
+-int32_t Graph2D::getLastUsageH(int x, int y) const
+-{
+-  return h_edges_[x][y].last_usage;
+-}
+-
+-int32_t Graph2D::getLastUsageV(int x, int y) const
+-{
+-  return v_edges_[x][y].last_usage;
+ }
+ 
+ double Graph2D::getEstUsageH(const int x, const int y) const

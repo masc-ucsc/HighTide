@@ -1,0 +1,248 @@
+diff --git a/src/rsz/src/Resizer.cc b/src/rsz/src/Resizer.cc
+--- a/src/rsz/src/Resizer.cc
++++ b/src/rsz/src/Resizer.cc
+@@ -47,6 +47,7 @@
+ #include "grt/GlobalRouter.h"
+ #include "odb/PtrSetMap.h"
+ #include "odb/db.h"
++#include "odb/dbWireCodec.h"
+ #include "odb/dbObject.h"
+ #include "odb/dbSet.h"
+ #include "odb/dbTypes.h"
+@@ -3445,6 +3446,87 @@
+   }
+ }
+ 
++namespace {
++// Explicit handoff permission, separate from ordinary user dont_touch.
++// Only an input on an unfixed signal net may be reconnected. The instance
++// remains protected for sizing, cloning, deletion and all other operations.
++bool canReconnectFixedEndpoint(odb::dbObject* object)
++{
++  if (!object || object->getObjectType() != odb::dbITermObj) {
++    return false;
++  }
++  auto* pin = static_cast<odb::dbITerm*>(object);
++  auto* inst = pin->getInst();
++  auto* permission = odb::dbBoolProperty::find(
++      inst, "livehd_preroute_buffer_inputs_v1");
++  auto* net = pin->getNet();
++  if (!permission || !permission->getValue() || !inst->isDoNotTouch()
++      || !inst->isFixed() || pin->getIoType() != odb::dbIoType::INPUT
++      || !net || net->isDoNotTouch() || net->isSpecial()
++      || net->getSigType() != odb::dbSigType::SIGNAL) {
++    return false;
++  }
++  if (auto* wire = net->getWire()) {
++    odb::dbWireDecoder decoder;
++    decoder.begin(wire);
++    for (auto op = decoder.next(); op != odb::dbWireDecoder::END_DECODE;
++         op = decoder.next()) {
++      if ((op == odb::dbWireDecoder::PATH || op == odb::dbWireDecoder::SHORT
++           || op == odb::dbWireDecoder::JUNCTION)
++          && decoder.getWireType() == odb::dbWireType::FIXED) {
++        return false;
++      }
++    }
++  }
++  return true;
++}
++
++class FixedEndpointBufferScope
++{
++ public:
++  explicit FixedEndpointBufferScope(const std::vector<odb::dbObject*>& loads)
++  {
++    // Validate every protected load before relaxing any instance flag. This
++    // also rejects a mixed batch containing an immutable pin on the same cell.
++    for (auto* object : loads) {
++      if (!object || object->getObjectType() != odb::dbITermObj) {
++        continue;
++      }
++      auto* inst = static_cast<odb::dbITerm*>(object)->getInst();
++      if (inst->isDoNotTouch()) {
++        if (!canReconnectFixedEndpoint(object)) {
++          instances_.clear();
++          return;
++        }
++        if (std::find(instances_.begin(), instances_.end(), inst)
++            == instances_.end()) {
++          instances_.push_back(inst);
++        }
++      }
++    }
++    for (auto* inst : instances_) {
++      inst->setDoNotTouch(false);
++    }
++  }
++  ~FixedEndpointBufferScope()
++  {
++    for (auto* inst : instances_) {
++      inst->setDoNotTouch(true);
++    }
++  }
++  FixedEndpointBufferScope(const FixedEndpointBufferScope&) = delete;
++  FixedEndpointBufferScope& operator=(const FixedEndpointBufferScope&) = delete;
++
++ private:
++  std::vector<odb::dbInst*> instances_;
++};
++}  // namespace
++
++bool Resizer::canBufferLoad(const sta::Pin* pin) const
++{
++  return !dontTouch(pin) || canReconnectFixedEndpoint(db_network_->staToDb(pin));
++}
++
+ void Resizer::setDontTouch(const sta::Instance* inst, bool dont_touch)
+ {
+   dbInst* db_inst = db_network_->staToDb(inst);
+@@ -5496,12 +5578,15 @@
+   }
+ 
+   // Insert buffer before the load_pin
+-  odb::dbInst* buffer_inst = db_net->insertBufferBeforeLoad(load_pin,
++  odb::dbInst* buffer_inst = [&]() {
++    FixedEndpointBufferScope permission({load_pin});
++    return db_net->insertBufferBeforeLoad(load_pin,
+                                                             buffer_cell,
+                                                             loc,
+                                                             new_buf_base_name,
+                                                             new_net_base_name,
+                                                             uniquify);
++  }();
+ 
+   if (!buffer_inst) {
+     logger_->error(RSZ,
+@@ -5616,13 +5701,17 @@
+     return nullptr;
+   }
+ 
+-  odb::dbInst* buffer_inst = net->insertBufferBeforeLoads(loads,
++  odb::dbInst* buffer_inst = [&]() {
++    FixedEndpointBufferScope permission(
++        std::vector<odb::dbObject*>(loads.begin(), loads.end()));
++    return net->insertBufferBeforeLoads(loads,
+                                                           buffer_cell,
+                                                           loc,
+                                                           new_buf_base_name,
+                                                           new_net_base_name,
+                                                           uniquify,
+                                                           loads_on_diff_nets);
++  }();
+ 
+   if (!buffer_inst) {
+     logger_->error(RSZ,
+diff --git a/src/rsz/include/rsz/Resizer.hh b/src/rsz/include/rsz/Resizer.hh
+--- a/src/rsz/include/rsz/Resizer.hh
++++ b/src/rsz/include/rsz/Resizer.hh
+@@ -313,6 +313,7 @@
+       const odb::dbNameUniquifyType& uniquify = odb::dbNameUniquifyType::ALWAYS,
+       bool loads_on_diff_nets = false);
+   bool dontTouch(const sta::Pin* pin) const;
++  bool canBufferLoad(const sta::Pin* pin) const;
+   void reportDontTouch();
+ 
+   void reportFastBufferSizes();
+diff --git a/src/rsz/src/Rebuffer.cc b/src/rsz/src/Rebuffer.cc
+--- a/src/rsz/src/Rebuffer.cc
++++ b/src/rsz/src/Rebuffer.cc
+@@ -1868,7 +1868,7 @@
+         const sta::Pin* load_pin = node->loadPin();
+ 
+         // Skip DontTouch pins
+-        if (resizer_->dontTouch(load_pin)) {
++        if (!resizer_->canBufferLoad(load_pin)) {
+           debugPrint(logger_,
+                      RSZ,
+                      "rebuffer",
+diff --git a/src/rsz/src/RepairHold.cc b/src/rsz/src/RepairHold.cc
+--- a/src/rsz/src/RepairHold.cc
++++ b/src/rsz/src/RepairHold.cc
+@@ -726,7 +726,7 @@
+   sta::PinSet load_pins_set(network_);
+   for (const sta::Pin* load_pin : load_pins) {
+     if (load_pin != nullptr) {
+-      if (resizer_->dontTouch(load_pin)) {
++      if (!resizer_->canBufferLoad(load_pin)) {
+         continue;
+       }
+       load_pins_set.insert(const_cast<sta::Pin*>(load_pin));
+diff --git a/src/rsz/test/fixed_endpoint_buffer.tcl b/src/rsz/test/fixed_endpoint_buffer.tcl
+--- /dev/null
++++ b/src/rsz/test/fixed_endpoint_buffer.tcl
+@@ -0,0 +1,60 @@
++try {
++source helpers.tcl
++source hi_fanout.tcl
++set file [make_result_file fixed_endpoint_buffer.def]
++write_hi_fanout_def $file 4
++read_liberty Nangate45/Nangate45_typ.lib
++read_lef Nangate45/Nangate45.lef
++read_def $file
++set block [ord::get_db_block]
++set inst [$block findInst load0]
++set other [$block findInst load1]
++foreach i [list $inst $other] {$i setPlacementStatus FIRM; $i setDoNotTouch true}
++set clock [$block findNet clk1]
++set wire [odb::dbWire_create $clock]
++set enc [odb::dbWireEncoder]
++$enc begin $wire
++$enc newPath [[ord::get_db_tech] findLayer metal2] FIXED
++$enc addPoint 1000 1000
++$enc addPoint 1000 2000
++$enc end
++rename $enc {}
++proc wire_state {wire} {
++ set result {}
++ for {set k 0} {$k < [$wire length]} {incr k} {lappend result [$wire getOpcode $k] [$wire getData $k]}
++ return $result
++}
++set encoded [wire_state $wire]
++proc state {inst} {return [list [[$inst getMaster] getName] [$inst getOrigin] [$inst getOrient] [$inst getPlacementStatus] [$inst isDoNotTouch]]}
++set original [state $inst]
++proc reject {pins} {
++ set block [ord::get_db_block]
++ set count [llength [$block getInsts]]
++ if {![catch {insert_buffer -buffer_cell BUF_X1 -load_pins $pins -buffer_name rejected}]} {error "Expected protected/malformed load rejection: $pins"}
++ if {[llength [$block getInsts]] != $count} {error "Rejected buffer mutated cell count"}
++}
++reject {load0/D}
++set prop [odb::dbBoolProperty_create $inst livehd_preroute_buffer_inputs_v1 false]
++reject {load0/D}
++$prop setValue true
++$inst setPlacementStatus PLACED
++reject {load0/D}
++$inst setPlacementStatus FIRM
++$clock setDoNotTouch true
++reject {load0/CK}
++$clock setDoNotTouch false
++# Even without the net flag, encoded FIXED geometry cannot be reconnected.
++reject {load0/CK}
++reject {load0/D load0/CK}
++set net [[$inst findITerm D] getNet]
++insert_buffer -buffer_cell BUF_X1 -load_pins {load0/D} -buffer_name permitted
++if {[[$inst findITerm D] getNet] eq $net || [state $inst] ne $original} {error "Ordinary input did not reconnect with protected state restored"}
++odb::dbBoolProperty_create $other livehd_preroute_buffer_inputs_v1 true
++# Distinct ordinary nets: API throws after scope construction. Flags must restore.
++reject {load0/D load1/D}
++if {![$inst isDoNotTouch] || ![$other isDoNotTouch]} {error "Exception lost instance protection"}
++insert_buffer -buffer_cell BUF_X1 -load_pins {load1/D load2/D} -buffer_name permitted_multi
++if {[[$other findITerm D] getNet] eq $net || ![$other isDoNotTouch]} {error "Multi-load insertion failed or lost protection"}
++if {[state $inst] ne $original || [wire_state $wire] ne $encoded} {error "Protected geometry changed"}
++puts "pass"
++} on error {message opts} {puts stderr "$message\n[dict get $opts -errorinfo]"; exit 1}
+diff --git a/src/rsz/test/BUILD b/src/rsz/test/BUILD
+--- a/src/rsz/test/BUILD
++++ b/src/rsz/test/BUILD
+@@ -631,3 +631,10 @@
+     ],
+     visibility = ["//visibility:public"],
+ )
++
++regression_test(
++    name = "fixed_endpoint_buffer",
++    check_log = False,
++    check_passfail = True,
++    data = [":test_resources"],
++)

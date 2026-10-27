@@ -1,0 +1,42 @@
+diff --git a/src/drt/src/gc/FlexGC.h b/src/drt/src/gc/FlexGC.h
+--- a/src/drt/src/gc/FlexGC.h
++++ b/src/drt/src/gc/FlexGC.h
+@@ -48,6 +48,7 @@
+   void setEnableSurgicalFix(bool in);
+   void addPAObj(frConnFig* obj, frBlockObject* owner);
+   // getters
++  const odb::Rect& getDrcBox() const;
+   std::vector<std::unique_ptr<gcNet>>& getNets();
+   gcNet* getNet(frNet* net);
+   frDesign* getDesign() const;
+diff --git a/src/drt/src/gc/FlexGC.cpp b/src/drt/src/gc/FlexGC.cpp
+--- a/src/drt/src/gc/FlexGC.cpp
++++ b/src/drt/src/gc/FlexGC.cpp
+@@ -206,6 +206,11 @@
+   impl_->drcBox_ = in;
+ }
+ 
++const odb::Rect& FlexGCWorker::getDrcBox() const
++{
++  return impl_->drcBox_;
++}
++
+ const std::vector<std::unique_ptr<frMarker>>& FlexGCWorker::getMarkers() const
+ {
+   return impl_->markers_;
+diff --git a/src/drt/src/TritonRoute.cpp b/src/drt/src/TritonRoute.cpp
+--- a/src/drt/src/TritonRoute.cpp
++++ b/src/drt/src/TritonRoute.cpp
+@@ -1211,7 +1211,11 @@
+     for (const auto& worker : workers) {
+       for (auto& marker : worker->getMarkers()) {
+         odb::Rect bbox = marker->getBBox();
+-        if (!bbox.intersects(requiredDrcBox)) {
++        // Geometry crossing the worker's query boundary can produce markers
++        // outside its validated region, where neighboring pins/metal are absent.
++        // The worker covering that region has the required surrounding context.
++        if (!bbox.intersects(worker->getDrcBox())
++            || !bbox.intersects(requiredDrcBox)) {
+           continue;
+         }
+         auto layerNum = marker->getLayerNum();

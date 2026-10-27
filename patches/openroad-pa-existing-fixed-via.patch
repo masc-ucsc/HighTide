@@ -1,0 +1,164 @@
+diff --git a/src/drt/src/pa/FlexPA_acc_point.cpp b/src/drt/src/pa/FlexPA_acc_point.cpp
+--- a/src/drt/src/pa/FlexPA_acc_point.cpp
++++ b/src/drt/src/pa/FlexPA_acc_point.cpp
+@@ -21,6 +21,7 @@
+ #include "db/tech/frViaDef.h"
+ #include "frBaseTypes.h"
+ #include "frProfileTask.h"
++#include "frRegionQuery.h"
+ #include "gc/FlexGC.h"
+ #include "odb/dbTransform.h"
+ #include "odb/dbTypes.h"
+@@ -1086,7 +1087,30 @@
+     }
+   }
+   design_rule_checker.addPAObj(ps, owner);
+-  design_rule_checker.addPAObj(via, owner);
++  // A fixed connection can already contain this exact access via. Checking
++  // a second copy would manufacture a same-net cut-spacing violation.
++  bool existing_access_via = false;
++  if (owner->typeId() == frcNet && static_cast<frNet*>(owner)->isFixed()) {
++    std::vector<frBlockObject*> nearby;
++    getDesign()->getRegionQuery()->queryDRObj(
++        via->getBBox(), via->getViaDef()->getCutLayerNum(), nearby);
++    for (auto* obj : nearby) {
++      if (obj->typeId() != frcVia) {
++        continue;
++      }
++      const auto* existing = static_cast<frVia*>(obj);
++      if (existing->hasNet() && existing->getNet() == owner
++          && existing->getViaDef() == via->getViaDef()
++          && existing->getOrigin() == via->getOrigin()
++          && existing->getOrient() == via->getOrient()) {
++        existing_access_via = true;
++        break;
++      }
++    }
++  }
++  if (!existing_access_via) {
++    design_rule_checker.addPAObj(via, owner);
++  }
+   for (auto& apPs : ap->getPathSegs()) {
+     design_rule_checker.addPAObj(&apPs, owner);
+   }
+diff --git a/src/drt/test/BUILD b/src/drt/test/BUILD
+--- a/src/drt/test/BUILD
++++ b/src/drt/test/BUILD
+@@ -30,6 +30,7 @@
+ # From CMakeLists.txt or_integration_tests(PASSFAIL_TESTS
+ PASSFAIL_TESTS = [
+     "fixed_wire_pin_access",
++    "fixed_wire_existing_via",
+ ]
+ 
+ ALL_TESTS = COMPULSORY_TESTS + PASSFAIL_TESTS
+@@ -103,7 +104,7 @@
+         name = test_name + "_resources",
+         srcs = [":regression_resources"] + ([
+             "//src/psm/test:asap7_pin_access_lefs",
+-        ] if test_name == "fixed_wire_pin_access" else []) + glob(
++        ] if test_name in ["fixed_wire_pin_access", "fixed_wire_existing_via"] else []) + glob(
+             [
+                 test_name + ".*",
+             ],
+@@ -122,7 +123,7 @@
+         name = test_name,
+         size = "large" if test_name in BIG_TESTS else "small",
+         check_passfail = True if test_name in PASSFAIL_TESTS else False,
+-        check_log = test_name != "fixed_wire_pin_access",
++        check_log = test_name not in ["fixed_wire_pin_access", "fixed_wire_existing_via"],
+         data = [":" + test_name + "_resources"],
+         visibility = ["//visibility:public"],
+     )
+diff --git a/src/drt/test/CMakeLists.txt b/src/drt/test/CMakeLists.txt
+--- a/src/drt/test/CMakeLists.txt
++++ b/src/drt/test/CMakeLists.txt
+@@ -17,6 +17,7 @@
+     via_access_layer
+   PASSFAIL_TESTS
+     fixed_wire_pin_access
++    fixed_wire_existing_via
+     cpp_tests
+ )
+ 
+diff --git a/src/drt/test/fixed_wire_existing_via.def b/src/drt/test/fixed_wire_existing_via.def
+--- /dev/null
++++ b/src/drt/test/fixed_wire_existing_via.def
+@@ -0,0 +1,56 @@
++VERSION 5.8 ;
++DIVIDERCHAR "." ;
++BUSBITCHARS "[]" ;
++DESIGN access ;
++UNITS DISTANCE MICRONS 1000 ;
++DIEAREA ( 0 0 ) ( 10000 10000 ) ;
++GCELLGRID X 0 DO 11 STEP 1000 ;
++GCELLGRID Y 0 DO 11 STEP 1000 ;
++TRACKS X 116 DO 161 STEP 80 LAYER Pad ;
++TRACKS Y 116 DO 168 STEP 80 LAYER Pad ;
++TRACKS X 116 DO 161 STEP 80 LAYER M9 ;
++TRACKS Y 116 DO 168 STEP 80 LAYER M9 ;
++TRACKS X 116 DO 161 STEP 80 LAYER M8 ;
++TRACKS Y 116 DO 168 STEP 80 LAYER M8 ;
++TRACKS X 16 DO 203 STEP 64 LAYER M7 ;
++TRACKS Y 16 DO 211 STEP 64 LAYER M7 ;
++TRACKS X 60 DO 269 STEP 48 LAYER M6 ;
++TRACKS Y 16 DO 211 STEP 64 LAYER M6 ;
++TRACKS X 12 DO 270 STEP 48 LAYER M5 ;
++TRACKS Y 12 DO 281 STEP 48 LAYER M5 ;
++TRACKS X 45 DO 359 STEP 36 LAYER M4 ;
++TRACKS Y 12 DO 281 STEP 48 LAYER M4 ;
++TRACKS X 9 DO 360 STEP 36 LAYER M3 ;
++TRACKS Y 9 DO 375 STEP 36 LAYER M3 ;
++TRACKS X 9 DO 360 STEP 36 LAYER M2 ;
++TRACKS Y 45 DO 50 STEP 270 LAYER M2 ;
++TRACKS X 9 DO 360 STEP 36 LAYER M2 ;
++TRACKS Y 81 DO 50 STEP 270 LAYER M2 ;
++TRACKS X 9 DO 360 STEP 36 LAYER M2 ;
++TRACKS Y 117 DO 50 STEP 270 LAYER M2 ;
++TRACKS X 9 DO 360 STEP 36 LAYER M2 ;
++TRACKS Y 153 DO 50 STEP 270 LAYER M2 ;
++TRACKS X 9 DO 360 STEP 36 LAYER M2 ;
++TRACKS Y 189 DO 50 STEP 270 LAYER M2 ;
++TRACKS X 9 DO 360 STEP 36 LAYER M2 ;
++TRACKS Y 225 DO 50 STEP 270 LAYER M2 ;
++TRACKS X 9 DO 360 STEP 36 LAYER M2 ;
++TRACKS Y 270 DO 49 STEP 270 LAYER M2 ;
++TRACKS X 9 DO 360 STEP 36 LAYER M1 ;
++TRACKS Y 9 DO 375 STEP 36 LAYER M1 ;
++COMPONENTS 1 ;
++- u0 BUFx2_ASAP7_75t_R + FIXED ( 1080 1080 ) N ;
++END COMPONENTS
++PINS 2 ;
++- p0 + NET obstacle + DIRECTION INPUT + USE SIGNAL
++ + LAYER M2 ( -9 -9 ) ( 9 9 ) + FIXED ( 909 1161 ) N ;
++- p1 + NET obstacle + DIRECTION OUTPUT + USE SIGNAL
++ + LAYER M2 ( -9 -9 ) ( 9 9 ) + FIXED ( 1197 1161 ) N ;
++END PINS
++NETS 2 ;
++- n1 ( u0 Y ) ;
++- obstacle ( PIN p0 ) ( PIN p1 ) ( u0 A ) + USE SIGNAL
++ + FIXED M2 ( 909 1161 0 ) ( 1197 1161 0 )
++ NEW M2 ( 1125 1161 0 ) VIA12 ;
++END NETS
++END DESIGN
+diff --git a/src/drt/test/fixed_wire_existing_via.tcl b/src/drt/test/fixed_wire_existing_via.tcl
+--- /dev/null
++++ b/src/drt/test/fixed_wire_existing_via.tcl
+@@ -0,0 +1,17 @@
++# Reuse an existing fixed connection; do not manufacture a duplicate cut.
++read_lef "../../psm/test/asap7/asap7_tech_1x_201209.lef"
++read_lef "../../psm/test/asap7/asap7sc7p5t_28_R_1x_220121a.lef"
++read_def "fixed_wire_existing_via.def"
++set_routing_layers -signal M2-M7
++pin_access -min_access_points 10000 -via_in_pin_bottom_layer M1 -via_in_pin_top_layer M1
++set points {}
++foreach ap [[ord::get_db_block] getAccessPoints] {
++  set mpin [$ap getMPin]
++  if {$mpin != "NULL" && [[$mpin getMTerm] getName] == "A" && [$ap hasAccess UP]} {
++    lappend points [$ap getPoint]
++  }
++}
++if {[lsort $points] != [lsort {{45 81} {45 189} {27 153} {27 189}}]} {
++  error "Existing via access or neighboring cut-spacing check failed: $points"
++}
++puts "pass"

@@ -1,0 +1,222 @@
+diff --git a/src/rsz/include/rsz/Resizer.hh b/src/rsz/include/rsz/Resizer.hh
+--- a/src/rsz/include/rsz/Resizer.hh
++++ b/src/rsz/include/rsz/Resizer.hh
+@@ -817,6 +817,9 @@
+                                 size_t& resistor_id);
+ 
+  public:
++  // Physical feasibility only; caller retains timing and dont_touch checks.
++  bool canReplaceCell(sta::Instance* inst,
++                      const sta::LibertyCell* replacement) const;
+   bool replaceCell(sta::Instance* inst,
+                    const sta::LibertyCell* replacement,
+                    bool journal = true);
+diff --git a/src/rsz/src/Resizer.cc b/src/rsz/src/Resizer.cc
+--- a/src/rsz/src/Resizer.cc
++++ b/src/rsz/src/Resizer.cc
+@@ -2990,6 +2990,21 @@
+   return best_cell;
+ }
+ 
++bool Resizer::canReplaceCell(sta::Instance* inst,
++                            const sta::LibertyCell* replacement) const
++{
++  dbMaster* master = db_->findMaster(replacement->name().c_str());
++  if (!master) {
++    return false;
++  }
++  // Incremental pin access precedes final legalization. Check immutable
++  // neighbors and route reservations before selecting a resize candidate.
++  const auto source = estimate_parasitics_->getParasiticsSrc();
++  return (source != est::ParasiticsSrc::kGlobalRouting
++          && source != est::ParasiticsSrc::kDetailedRouting)
++         || opendp_->canResizeCell(db_network_->staToDb(inst), master);
++}
++
+ // Replace LEF with LEF so ports stay aligned in instance.
+ bool Resizer::replaceCell(sta::Instance* inst,
+                           const sta::LibertyCell* replacement,
+@@ -3000,12 +3015,7 @@
+ 
+   if (replacement_master) {
+     dbInst* dinst = db_network_->staToDb(inst);
+-    // Incremental pin access runs before final detailed placement. A wider
+-    // cell must not cover immutable endpoints or reserved routing corridors.
+-    const auto parasitics_src = estimate_parasitics_->getParasiticsSrc();
+-    if ((parasitics_src == est::ParasiticsSrc::kGlobalRouting
+-         || parasitics_src == est::ParasiticsSrc::kDetailedRouting)
+-        && !opendp_->canResizeCell(dinst, replacement_master)) {
++    if (!canReplaceCell(inst, replacement)) {
+       return false;
+     }
+     dbMaster* master = dinst->getMaster();
+diff --git a/src/rsz/src/move/SizeUpGenerator.hh b/src/rsz/src/move/SizeUpGenerator.hh
+--- a/src/rsz/src/move/SizeUpGenerator.hh
++++ b/src/rsz/src/move/SizeUpGenerator.hh
+@@ -53,14 +53,16 @@
+                         float& load_cap,
+                         sta::LibertyPort*& in_port,
+                         float& prev_drive) const;
+-  sta::LibertyCell* selectReplacement(sta::LibertyPort* in_port,
++  sta::LibertyCell* selectReplacement(sta::Instance* inst,
++                                      sta::LibertyPort* in_port,
+                                       sta::LibertyPort* drvr_port,
+                                       float load_cap,
+                                       float prev_drive,
+                                       const sta::Scene* scene,
+                                       const sta::MinMax* min_max) const;
+ 
+-  sta::LibertyCell* upsizeCell(sta::LibertyPort* in_port,
++  sta::LibertyCell* upsizeCell(sta::Instance* inst,
++                               sta::LibertyPort* in_port,
+                                sta::LibertyPort* drvr_port,
+                                float load_cap,
+                                float prev_drive,
+diff --git a/src/rsz/src/move/SizeUpGenerator.cc b/src/rsz/src/move/SizeUpGenerator.cc
+--- a/src/rsz/src/move/SizeUpGenerator.cc
++++ b/src/rsz/src/move/SizeUpGenerator.cc
+@@ -22,6 +22,7 @@
+ #include "sta/NetworkClass.hh"
+ #include "sta/Path.hh"
+ #include "sta/TimingArc.hh"
++#include "utl/Logger.h"
+ 
+ namespace rsz {
+ 
+@@ -53,7 +54,7 @@
+   }
+ 
+   sta::LibertyCell* replacement = selectReplacement(
+-      in_port, drvr_port, load_cap, prev_drive, scene, min_max);
++      inst, in_port, drvr_port, load_cap, prev_drive, scene, min_max);
+   if (replacement == nullptr
+       || !resizer_.replacementPreservesMaxCap(inst, replacement)) {
+     return candidates;
+@@ -126,6 +127,7 @@
+ }
+ 
+ sta::LibertyCell* SizeUpGenerator::selectReplacement(
++    sta::Instance* inst,
+     sta::LibertyPort* in_port,
+     sta::LibertyPort* drvr_port,
+     const float load_cap,
+@@ -133,10 +135,11 @@
+     const sta::Scene* scene,
+     const sta::MinMax* min_max) const
+ {
+-  return upsizeCell(in_port, drvr_port, load_cap, prev_drive, scene, min_max);
+-}
+-
+-sta::LibertyCell* SizeUpGenerator::upsizeCell(sta::LibertyPort* in_port,
++  return upsizeCell(inst, in_port, drvr_port, load_cap, prev_drive, scene, min_max);
++}
++
++sta::LibertyCell* SizeUpGenerator::upsizeCell(sta::Instance* inst,
++                                              sta::LibertyPort* in_port,
+                                               sta::LibertyPort* drvr_port,
+                                               const float load_cap,
+                                               const float prev_drive,
+@@ -155,8 +158,8 @@
+     return nullptr;
+   }
+ 
+-  // Evaluate stronger equivalent cells first so the search stops on the best
+-  // local replacement.
++  // Evaluate equivalent cells in drive-resistance order; physical width
++  // need not follow this electrical ordering.
+   const std::string& in_port_name = in_port->name();
+   const std::string& drvr_port_name = drvr_port->name();
+   std::ranges::sort(
+@@ -197,7 +200,20 @@
+     const float swappable_delay
+         = resizer_.gateDelay(swappable_drvr, load_cap, scene, min_max)
+           + prev_drive * swappable_input->capacitance();
+-    if (swappable_drive < drive && swappable_delay < delay) {
++    debugPrint(resizer_.logger(),
++               utl::RSZ,
++               "size_up_move",
++               3,
++               "Candidate {} -> {} drive {} < {}, delay {} < {}, clearance {}",
++               cell->name(),
++               swappable->name(),
++               swappable_drive,
++               drive,
++               swappable_delay,
++               delay,
++               resizer_.canReplaceCell(inst, swappable));
++    if (swappable_drive < drive && swappable_delay < delay
++        && resizer_.canReplaceCell(inst, swappable)) {
+       return swappable;
+     }
+   }
+diff --git a/src/rsz/test/sizeup_fixed_clearance.tcl b/src/rsz/test/sizeup_fixed_clearance.tcl
+--- /dev/null
++++ b/src/rsz/test/sizeup_fixed_clearance.tcl
+@@ -0,0 +1,53 @@
++try {
++source helpers.tcl
++read_liberty Nangate45/Nangate45_typ.lib
++# Model a legal library family whose electrical ordering is not width ordering.
++set f [open Nangate45/Nangate45.lef r];set lef [read $f];close $f
++set start [string first {MACRO BUF_X2
++} $lef]
++set finish [string first {END BUF_X2} $lef $start]
++set macro [string range $lef $start $finish]
++set wider [string map {{SIZE 0.76 BY} {SIZE 2.66 BY}} $macro]
++if {$macro eq $wider} {error "Fixture width replacement failed"}
++set lef [string replace $lef $start $finish $wider]
++set lef_file [make_result_file nonmonotonic.lef]
++set f [open $lef_file w];puts -nonewline $f $lef;close $f
++read_lef $lef_file
++read_def repair_setup1.def
++initialize_floorplan -die_area {0 0 40 1200} -core_area {0 0 40 1200} -site FreePDK45_38x28_10R_NP_162NW_34O
++source Nangate45/Nangate45.vars
++source Nangate45/Nangate45.rc
++source $tracks_file
++create_clock -period 0.1 clk
++set_propagated_clock clk
++[[ord::get_db_block] findInst u1] swapMaster [[ord::get_db] findMaster BUF_X32]
++detailed_placement
++set_wire_rc -resistance 0.0001 -capacitance 0.001
++set_routing_layers -signal $global_routing_layers
++global_route
++estimate_parasitics -global_routing
++set block [ord::get_db_block]
++set target [$block findInst u2]
++foreach i [$block getInsts] {if {$i ne $target} {$i setDoNotTouch true}}
++$target setOrient R0
++set before [[$target getMaster] getName]
++lassign [$target getOrigin] x y
++set small [[ord::get_db] findMaster BUF_X4]
++set obstacle [odb::dbInst_create $block [[ord::get_db] findMaster BUF_X1] fixed_neighbor]
++$obstacle setOrigin [expr {$x+[$small getWidth]}] $y
++$obstacle setPlacementStatus FIRM
++$obstacle setDoNotTouch true
++# Keep both replacement sizes eligible; isolate the physical-clearance decision.
++set_opt_config -limit_sizing_area 10 -limit_sizing_leakage 10
++set_dont_use [get_lib_cells CLKBUF*]
++set fixed_before [list [$obstacle getOrigin] [$obstacle getPlacementStatus] [$obstacle getMaster]]
++set count_before [llength [$block getInsts]]
++repair_timing -setup -sequence sizeup -skip_last_gasp -max_passes 1
++if {[[$target getMaster] getName] ne "BUF_X4"} {error "Did not select legal fallback BUF_X4"}
++if {[list [$obstacle getOrigin] [$obstacle getPlacementStatus] [$obstacle getMaster]] ne $fixed_before} {error "Fixed neighbor changed"}
++if {[llength [$block getInsts]] != $count_before} {error "Unexpected topology change"}
++set a [$target getBBox];set b [$obstacle getBBox]
++if {[$a xMin] < [$b xMax] && [$b xMin] < [$a xMax] && [$a yMin] < [$b yMax] && [$b yMin] < [$a yMax]} {error "Fallback overlaps fixed neighbor"}
++puts "pass"
++} on error {message opts} {puts stderr "$message\n[dict get $opts -errorinfo]";exit 1}
++exit 0
+diff --git a/src/rsz/test/BUILD b/src/rsz/test/BUILD
+--- a/src/rsz/test/BUILD
++++ b/src/rsz/test/BUILD
+@@ -638,3 +638,10 @@
+     check_passfail = True,
+     data = [":test_resources"],
+ )
++
++regression_test(
++    name = "sizeup_fixed_clearance",
++    check_log = False,
++    check_passfail = True,
++    data = [":test_resources"],
++)

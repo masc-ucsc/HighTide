@@ -1,0 +1,104 @@
+--- a/src/grt/src/fastroute/src/maze.cpp
++++ b/src/grt/src/fastroute/src/maze.cpp
+@@ -418,14 +418,45 @@
+ // non recursive version of heapify
+ // Duplicate source entries retain the legacy first-occurrence lookup. Other
+ // entries have a direct index, maintained by the unchanged heap comparisons.
+-using HeapPositions = std::unordered_map<double*, int>;
+ static constexpr int duplicate_position = -2;
+ 
++// Pointers in this heap all belong to the contiguous d1 grid. Epoch tags avoid
++// clearing the entire grid for each tree edge, without per-entry allocations.
++class HeapPositions
++{
++ public:
++  HeapPositions(double* base, size_t size) : base_(base), entries_(size) {}
++  int get(double* value) const
++  {
++    const auto& entry = entries_[value - base_];
++    return entry.epoch == epoch_ ? entry.index : -1;
++  }
++  void set(double* value, int index)
++  {
++    entries_[value - base_] = {index, epoch_};
++  }
++  void seed(double* value, int index)
++  {
++    set(value, get(value) == -1 ? index : duplicate_position);
++  }
++  void clear()
++  {
++    if (++epoch_ == 0) {
++      std::fill(entries_.begin(), entries_.end(), Entry{});
++      epoch_ = 1;
++    }
++  }
++ private:
++  struct Entry { int index = -1; uint32_t epoch = 0; };
++  double* base_;
++  std::vector<Entry> entries_;
++  uint32_t epoch_ = 1;
++};
++
+ static void recordHeapPosition(HeapPositions& positions, double* value, int index)
+ {
+-  auto& position = positions.at(value);
+-  if (position != duplicate_position) {
+-    position = index;
++  if (positions.get(value) != duplicate_position) {
++    positions.set(value, index);
+   }
+ }
+ 
+@@ -480,9 +511,8 @@
+ // remove the entry with minimum distance from Priority queue
+ static void removeMin(std::vector<double*>& array, HeapPositions& positions)
+ {
+-  const auto removed = positions.find(array.front());
+-  if (removed->second != duplicate_position) {
+-    positions.erase(removed);
++  if (positions.get(array.front()) != duplicate_position) {
++    positions.set(array.front(), -1);
+   }
+   if (array.size() == 1) {
+     array.pop_back();
+@@ -1264,10 +1294,10 @@
+     StNetOrder();
+   }
+ 
+-  HeapPositions heap_positions;
+   auto& src_heap = src_heap_2D_;
+   auto& dest_heap = dest_heap_2D_;
+   auto& d1 = d1_2D_;
++  HeapPositions heap_positions(d1.data(), d1.num_elements());
+   auto& d2 = d2_2D_;
+   auto& pop_heap2 = pop_heap2_2D_;
+ 
+@@ -1305,13 +1335,12 @@
+ 
+     if (adj_cost >= BIG_INT) {  // neighbor has not been put into src_heap
+       src_heap.push_back(&d1[adj_y][adj_x]);
+-      heap_positions.emplace(src_heap.back(), src_heap.size() - 1);
++      heap_positions.seed(src_heap.back(), src_heap.size() - 1);
+       updateHeap(src_heap, src_heap.size() - 1, heap_positions);
+     } else if (adj_cost > cost) {  // neighbor has been put into src_heap
+                                    // but needs update
+       double* dtmp = &d1[adj_y][adj_x];
+-      const auto found = heap_positions.find(dtmp);
+-      int pos = found == heap_positions.end() ? -1 : found->second;
++      int pos = heap_positions.get(dtmp);
+       if (pos == duplicate_position) {
+         const auto it = std::ranges::find(src_heap, dtmp);
+         pos = it == src_heap.end() ? -1 : int(it - src_heap.begin());
+@@ -1468,10 +1497,7 @@
+ 
+       heap_positions.clear();
+       for (int i = 0; i < int(src_heap.size()); ++i) {
+-        auto [entry, inserted] = heap_positions.emplace(src_heap[i], i);
+-        if (!inserted) {
+-          entry->second = duplicate_position;
+-        }
++        heap_positions.seed(src_heap[i], i);
+       }
+ 
+       // while loop to find shortest path

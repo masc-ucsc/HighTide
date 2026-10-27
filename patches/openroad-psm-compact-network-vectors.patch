@@ -1,0 +1,53 @@
+diff --git a/src/psm/src/ir_network.cpp b/src/psm/src/ir_network.cpp
+--- a/src/psm/src/ir_network.cpp
++++ b/src/psm/src/ir_network.cpp
+@@ -1005,20 +1005,11 @@
+     }
+   }
+ 
+-  // use list to speed up erase
+-  std::list<std::unique_ptr<Node>> cleanup;
+-  for (auto& node : nodes) {
+-    cleanup.push_back(std::move(node));
+-  }
+-  nodes.clear();
+-
+-  std::erase_if(cleanup, [&](const auto& other) {
+-    return removes.find(other.get()) != removes.end();
++  // Compact in place: survivor order and node addresses are unchanged,
++  // without allocating a temporary list entry for every node.
++  std::erase_if(nodes, [&](const auto& node) {
++    return removes.find(node.get()) != removes.end();
+   });
+-
+-  for (auto& node : cleanup) {
+-    nodes.emplace_back(std::move(node));
+-  }
+ 
+   const std::size_t final_node_size = nodes.size();
+ 
+@@ -1046,20 +1037,12 @@
+ 
+   const std::size_t start_connection_size = connections_.size();
+ 
+-  // use list to speed up erase
+-  std::list<std::unique_ptr<Connection>> cleanup;
++  std::erase_if(connections_, [&](const auto& conn) {
++    return removes.find(conn.get()) != removes.end();
++  });
++
+   for (auto& conn : connections_) {
+-    cleanup.push_back(std::move(conn));
+-  }
+-  connections_.clear();
+-
+-  std::erase_if(cleanup, [&](const auto& other) {
+-    return removes.find(other.get()) != removes.end();
+-  });
+-
+-  for (auto& conn : cleanup) {
+     conn->ensureNodeOrder();
+-    connections_.emplace_back(std::move(conn));
+   }
+ 
+   removes.clear();

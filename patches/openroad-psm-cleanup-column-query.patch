@@ -1,0 +1,169 @@
+diff --git a/src/psm/src/shape.h b/src/psm/src/shape.h
+--- a/src/psm/src/shape.h
++++ b/src/psm/src/shape.h
+@@ -36,9 +36,10 @@
+   Connections connectNodes(const IRNetwork::NodeTree& layer_nodes);
+   std::set<Node*> cleanupNodes(
+       int min_distance,
+-      const IRNetwork::NodeTree& layer_nodes,
++      const std::vector<std::unique_ptr<Node>>& layer_nodes,
+       const std::function<void(Node*, Node*)>& copy_func,
+-      const std::set<Node*>& shared_nodes);
++      const std::set<Node*>& shared_nodes,
++      const IRNetwork::NodeTree* reference = nullptr);
+ 
+   const odb::Rect& getShape() const { return shape_; }
+ 
+@@ -62,6 +63,8 @@
+                                       PointIndexableGetter<NodeData>>;
+ 
+   std::vector<Node*> getNodes(const IRNetwork::NodeTree& layer_nodes) const;
++  std::vector<Node*> getNodes(
++      const std::vector<std::unique_ptr<Node>>& layer_nodes) const;
+   IRNetwork::NodeTree getNodeTree(const std::vector<Node*>& nodes) const;
+ 
+   NodeDataTree createNodeDataValue(
+diff --git a/src/psm/src/shape.cpp b/src/psm/src/shape.cpp
+--- a/src/psm/src/shape.cpp
++++ b/src/psm/src/shape.cpp
+@@ -10,6 +10,7 @@
+ #include <map>
+ #include <memory>
+ #include <set>
++#include <stdexcept>
+ #include <string>
+ #include <utility>
+ #include <vector>
+@@ -142,14 +143,47 @@
+   return IRNetwork::NodeTree(nodes.begin(), nodes.end());
+ }
+ 
++std::vector<Node*> Shape::getNodes(
++    const std::vector<std::unique_ptr<Node>>& layer_nodes) const
++{
++  // sortNodes and overlap cleanup leave each layer ordered by x then y.
++  // Select inclusive rectangle intersections without a layer-wide R-tree.
++  std::vector<Node*> nodes;
++  auto column = std::lower_bound(
++      layer_nodes.begin(), layer_nodes.end(), shape_.xMin(),
++      [](const auto& node, int x) { return node->getPoint().x() < x; });
++  while (column != layer_nodes.end()
++         && (*column)->getPoint().x() <= shape_.xMax()) {
++    const int x = (*column)->getPoint().x();
++    const auto next = std::upper_bound(
++        column, layer_nodes.end(), x,
++        [](int value, const auto& node) { return value < node->getPoint().x(); });
++    auto node = std::lower_bound(
++        column, next, shape_.yMin(),
++        [](const auto& value, int y) { return value->getPoint().y() < y; });
++    for (; node != next && (*node)->getPoint().y() <= shape_.yMax(); ++node) {
++      // Match the ordered-set query's comparator-equivalence deduplication.
++      if (nodes.empty() || nodes.back()->compare(node->get()) != 0) {
++        nodes.push_back(node->get());
++      }
++    }
++    column = next;
++  }
++  return nodes;
++}
++
+ std::set<Node*> Shape::cleanupNodes(
+     int min_distance,
+-    const IRNetwork::NodeTree& layer_nodes,
++    const std::vector<std::unique_ptr<Node>>& layer_nodes,
+     const std::function<void(Node*, Node*)>& copy_func,
+-    const std::set<Node*>& shared_nodes)
++    const std::set<Node*>& shared_nodes,
++    const IRNetwork::NodeTree* reference)
+ {
+   // Process and filter nodes
+   const auto sorted_nodes = getNodes(layer_nodes);
++  if (reference && sorted_nodes != getNodes(*reference)) {
++    throw std::logic_error("PSM sorted-column/R-tree node query mismatch");
++  }
+   // getNodes has already sorted and deduplicated with Node::Compare.
+   // Stable partitioning preserves precisely the former ordered-set sequence.
+   std::vector<Node*> center_nodes;
+diff --git a/src/psm/src/ir_network.cpp b/src/psm/src/ir_network.cpp
+--- a/src/psm/src/ir_network.cpp
++++ b/src/psm/src/ir_network.cpp
+@@ -863,16 +863,20 @@
+                layer->getName(),
+                shapes.size());
+ 
+-    const auto node_trees = getNodeTree(layer);
++    std::unique_ptr<NodeTree> reference;
++    if (logger_->debugCheck(utl::PSM, "cleanup_node_columns", 1)) {
++      reference = std::make_unique<NodeTree>(getNodeTree(layer));
++    }
+     for (const auto& shape : shapes) {
+       const int min_distance = floorplanning_
+                                    ? (2 * shape->getShape().maxDXDY())
+                                    : min_node_pitch_[shape->getLayer()];
+       const auto shape_remove = shape->cleanupNodes(
+           min_distance,
+-          node_trees,
++          nodes_.at(layer),
+           [&](Node* keep, Node* remove) { copy(keep, remove); },
+-          shared_nodes);
++          shared_nodes,
++          reference.get());
+       auto& pending = remove_by_layer[layer];
+       pending.insert(pending.end(), shape_remove.begin(), shape_remove.end());
+     }
+diff --git a/src/psm/test/aes_asap7_vdd.tcl b/src/psm/test/aes_asap7_vdd.tcl
+--- a/src/psm/test/aes_asap7_vdd.tcl
++++ b/src/psm/test/aes_asap7_vdd.tcl
+@@ -1,3 +1,4 @@
++set_debug_level PSM cleanup_node_columns 1
+ source "helpers.tcl"
+ read_lef asap7/asap7_tech_1x_201209.lef
+ read_lef asap7/asap7sc7p5t_28_R_1x_220121a.lef
+diff --git a/src/psm/test/check_power_grid.tcl b/src/psm/test/check_power_grid.tcl
+--- a/src/psm/test/check_power_grid.tcl
++++ b/src/psm/test/check_power_grid.tcl
+@@ -1,3 +1,4 @@
++set_debug_level PSM cleanup_node_columns 1
+ # Check that check_power_grid works without a liberty file
+ # or the voltage on the net being set
+ source helpers.tcl
+diff --git a/src/psm/test/check_power_grid_macros.tcl b/src/psm/test/check_power_grid_macros.tcl
+--- a/src/psm/test/check_power_grid_macros.tcl
++++ b/src/psm/test/check_power_grid_macros.tcl
+@@ -1,3 +1,4 @@
++set_debug_level PSM cleanup_node_columns 1
+ source "helpers.tcl"
+ 
+ read_lef Nangate45/Nangate45.lef
+diff --git a/src/psm/test/check_power_grid_floorplanning.tcl b/src/psm/test/check_power_grid_floorplanning.tcl
+--- a/src/psm/test/check_power_grid_floorplanning.tcl
++++ b/src/psm/test/check_power_grid_floorplanning.tcl
+@@ -1,3 +1,4 @@
++set_debug_level PSM cleanup_node_columns 1
+ # Check that check_power_grid works without with floorplanning flag
+ source helpers.tcl
+ 
+diff --git a/src/psm/test/corners.tcl b/src/psm/test/corners.tcl
+--- a/src/psm/test/corners.tcl
++++ b/src/psm/test/corners.tcl
+@@ -1,3 +1,4 @@
++set_debug_level PSM cleanup_node_columns 1
+ source helpers.tcl
+ 
+ read_lef Nangate45/Nangate45.lef
+diff --git a/src/psm/test/gcd_test_vdd.tcl b/src/psm/test/gcd_test_vdd.tcl
+--- a/src/psm/test/gcd_test_vdd.tcl
++++ b/src/psm/test/gcd_test_vdd.tcl
+@@ -1,3 +1,4 @@
++set_debug_level PSM cleanup_node_columns 1
+ source helpers.tcl
+ 
+ read_lef Nangate45/Nangate45.lef
+diff --git a/src/psm/test/gcd_all_vss.tcl b/src/psm/test/gcd_all_vss.tcl
+--- a/src/psm/test/gcd_all_vss.tcl
++++ b/src/psm/test/gcd_all_vss.tcl
+@@ -1,3 +1,4 @@
++set_debug_level PSM cleanup_node_columns 1
+ source helpers.tcl
+ 
+ read_lef Nangate45/Nangate45.lef

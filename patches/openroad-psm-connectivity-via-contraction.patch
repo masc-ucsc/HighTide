@@ -1,0 +1,554 @@
+diff --git a/src/psm/include/psm/pdnsim.h b/src/psm/include/psm/pdnsim.h
+--- a/src/psm/include/psm/pdnsim.h
++++ b/src/psm/include/psm/pdnsim.h
+@@ -99,7 +99,8 @@
+   bool checkConnectivity(odb::dbNet* net,
+                          bool floorplanning,
+                          const std::string& error_file,
+-                         bool require_bterm);
++                         bool require_bterm,
++                         bool connectivity_only = false);
+   void setDebugGui(bool enable);
+ 
+   void clearSolvers();
+@@ -135,7 +136,9 @@
+   odb::dbTechLayer* getLowestLayer(odb::dbNet* db_net);
+   odb::dbNet* findPowerNet(const char* net_name);
+ 
+-  IRSolver* getIRSolver(odb::dbNet* net, bool floorplanning);
++  IRSolver* getIRSolver(odb::dbNet* net,
++                        bool floorplanning,
++                        bool connectivity_only = false);
+ 
+   odb::dbDatabase* db_ = nullptr;
+   sta::dbSta* sta_ = nullptr;
+diff --git a/src/psm/src/ir_network.cpp b/src/psm/src/ir_network.cpp
+--- a/src/psm/src/ir_network.cpp
++++ b/src/psm/src/ir_network.cpp
+@@ -4,15 +4,16 @@
+ #include "ir_network.h"
+ 
+ #include <algorithm>
+-#include <stdexcept>
+ #include <array>
+ #include <cstddef>
+ #include <fstream>
+ #include <iterator>
++#include <limits>
+ #include <list>
+ #include <map>
+ #include <memory>
+ #include <set>
++#include <stdexcept>
+ #include <string>
+ #include <utility>
+ #include <vector>
+@@ -33,8 +34,14 @@
+ 
+ namespace psm {
+ 
+-IRNetwork::IRNetwork(odb::dbNet* net, utl::Logger* logger, bool floorplanning)
+-    : net_(net), logger_(logger), floorplanning_(floorplanning)
++IRNetwork::IRNetwork(odb::dbNet* net,
++                     utl::Logger* logger,
++                     bool floorplanning,
++                     bool connectivity_only)
++    : net_(net),
++      logger_(logger),
++      floorplanning_(floorplanning),
++      connectivity_only_(connectivity_only)
+ {
+   if (!net_->getSigType().isSupply()) {
+     logger_->error(utl::PSM, 87, "{} is not a supply net.", net_->getName());
+@@ -90,6 +97,7 @@
+ 
+ void IRNetwork::reset()
+ {
++  via_contacts_.clear();
+   shapes_.clear();
+   nodes_.clear();
+   connections_.clear();
+@@ -614,12 +622,96 @@
+   }
+ }
+ 
++std::optional<IRNetwork::ViaContact> IRNetwork::connectivityContact(
++    odb::dbSBox* box)
++{
++  auto* via = box->getBlockVia();
++  if (!connectivity_only_ || via == nullptr) {
++    return std::nullopt;
++  }
++  auto [entry, inserted] = via_contacts_.try_emplace(via, std::nullopt);
++  if (!inserted) {
++    return entry->second;
++  }
++  auto* bottom = via->getBottomLayer();
++  auto* top = via->getTopLayer();
++  if (bottom == nullptr || top == nullptr || bottom == top) {
++    return std::nullopt;
++  }
++  std::vector<odb::dbShape> shapes;
++  box->getViaBoxes(shapes);
++  std::optional<odb::Rect> lower, upper;
++  for (const auto& shape : shapes) {
++    auto* layer = shape.getTechLayer();
++    if (layer->getRoutingLevel() == 0) {
++      continue;
++    }
++    if (layer != bottom && layer != top) {
++      return std::nullopt;
++    }
++    auto& plate = layer == bottom ? lower : upper;
++    if (plate) {
++      return std::nullopt;
++    }
++    plate = shape.getBox();
++  }
++  if (!lower || !upper) {
++    return std::nullopt;
++  }
++  std::optional<odb::Point> contact;
++  odb::dbTechLayer* cut_layer = nullptr;
++  int cuts = 0;
++  for (const auto& shape : shapes) {
++    auto* layer = shape.getTechLayer();
++    if (layer->getRoutingLevel() != 0) {
++      continue;
++    }
++    const auto& rect = shape.getBox();
++    const auto encloses = [&](const odb::Rect& plate) {
++      return plate.xMin() <= rect.xMin() && plate.yMin() <= rect.yMin()
++             && plate.xMax() >= rect.xMax() && plate.yMax() >= rect.yMax();
++    };
++    const int count = getEffectiveNumberOfCuts(shape);
++    if ((cut_layer && cut_layer != layer) || rect.dx() <= 0 || rect.dy() <= 0
++        || !encloses(*lower) || !encloses(*upper) || count <= 0
++        || cuts > std::numeric_limits<int>::max() - count) {
++      return std::nullopt;
++    }
++    cut_layer = layer;
++    cuts += count;
++    if (!contact) {
++      contact = rect.center();
++    }
++  }
++  if (contact) {
++    const auto origin = box->getViaXY();
++    entry->second = ViaContact{
++        odb::Point(contact->x() - origin.x(), contact->y() - origin.y()), cuts};
++  }
++  return entry->second;
++}
++
+ void IRNetwork::generateCutNodesForSBox(
+     odb::dbSBox* box,
+     bool single_via,
+     std::vector<std::unique_ptr<Node>>& new_nodes,
+     Connections& new_connections)
+ {
++  // This contraction preserves connectivity only, not distributed resistance.
++  // Use an actual cut center: the array origin may lie in an empty gap.
++  if (const auto contact = connectivityContact(box)) {
++    auto* via = box->getBlockVia();
++    const auto origin = box->getViaXY();
++    const odb::Point point(origin.x() + contact->offset.x(),
++                           origin.y() + contact->offset.y());
++    auto bottom = std::make_unique<Node>(point, via->getBottomLayer());
++    auto top = std::make_unique<Node>(point, via->getTopLayer());
++    new_connections.push_back(std::make_unique<ViaConnection>(
++        bottom.get(), top.get(), contact->cuts));
++    new_nodes.push_back(std::move(top));
++    new_nodes.push_back(std::move(bottom));
++    return;
++  }
+   // handle as via
+   std::vector<odb::dbShape> via_shapes;
+   box->getViaBoxes(via_shapes);
+@@ -794,18 +886,16 @@
+         for (std::size_t i = first; i < last; ++i) {
+           auto shape = layer_shapes.qbegin(
+               boost::geometry::index::intersects(nodes[i]->getPoint()));
+-          if (shape != layer_shapes.qend()
+-              && ++shape != layer_shapes.qend()) {
++          if (shape != layer_shapes.qend() && ++shape != layer_shapes.qend()) {
+             shared_nodes.insert(nodes[i].get());
+           }
+         }
+       } else {
+         const int ymin = nodes[first]->getPoint().y();
+         const int ymax = nodes[last - 1]->getPoint().y();
+-        const auto slab = std::size_t(std::upper_bound(boundaries.begin(),
+-                                                     boundaries.end(),
+-                                                     int64_t(x))
+-                                      - boundaries.begin());
++        const auto slab = std::size_t(
++            std::upper_bound(boundaries.begin(), boundaries.end(), int64_t(x))
++            - boundaries.begin());
+         if (!cached || slab != cached_slab || ymin != cached_ymin
+             || ymax != cached_ymax) {
+           starts.clear();
+@@ -1127,7 +1217,8 @@
+   // without allocating a temporary list entry for every node.
+   if (logger_->debugCheck(utl::PSM, "remove_node_marks", 1)) {
+     for (const auto& node : nodes) {
+-      if (node->cleanup_remove_ != (removes.find(node.get()) != removes.end())) {
++      if (node->cleanup_remove_
++          != (removes.find(node.get()) != removes.end())) {
+         throw std::logic_error("Power-grid node removal mark differs from set");
+       }
+     }
+diff --git a/src/psm/src/ir_network.h b/src/psm/src/ir_network.h
+--- a/src/psm/src/ir_network.h
++++ b/src/psm/src/ir_network.h
+@@ -64,11 +64,17 @@
+   using Polygon90 = boost::polygon::polygon_90_with_holes_data<int>;
+   using Polygon90Set = boost::polygon::polygon_90_set_data<int>;
+ 
+-  IRNetwork(odb::dbNet* net, utl::Logger* logger, bool floorplanning);
++  IRNetwork(odb::dbNet* net,
++            utl::Logger* logger,
++            bool floorplanning,
++            bool connectivity_only = false);
+ 
+   odb::dbNet* getNet() const { return net_; };
+ 
+   void construct();
++
++  bool isConnectivityOnly() const { return connectivity_only_; }
++  void setConnectivityOnly(bool value) { connectivity_only_ = value; }
+ 
+   bool isFloorplanningOnly() const { return floorplanning_; }
+   void setFloorplanning(bool value) { floorplanning_ = value; }
+@@ -107,7 +113,8 @@
+   void clearVisitedNodes();
+ 
+   const Connections& getConnections() const { return connections_; }
+-  using ConnectionAdjacency = std::unordered_map<Node*, std::vector<Connection*>>;
++  using ConnectionAdjacency
++      = std::unordered_map<Node*, std::vector<Connection*>>;
+   ConnectionAdjacency getConnectionMap() const;
+ 
+   odb::PtrMap<odb::dbInst, Node::NodeSet> getInstanceNodeMapping() const;
+@@ -190,6 +197,17 @@
+   utl::Logger* logger_;
+ 
+   bool floorplanning_;
++  bool connectivity_only_;
++  // A contact can represent an array only when all its cuts are enclosed by
++  // the same continuous lower and upper plates. Local coordinates are cached
++  // per immutable block via for one construction, including failed proofs.
++  struct ViaContact
++  {
++    odb::Point offset;
++    int cuts;
++  };
++  std::unordered_map<odb::dbVia*, std::optional<ViaContact>> via_contacts_;
++  std::optional<ViaContact> connectivityContact(odb::dbSBox* box);
+ 
+   LayerMap<std::vector<std::unique_ptr<Shape>>> shapes_;
+   LayerMap<std::vector<std::unique_ptr<Node>>> nodes_;
+diff --git a/src/psm/src/ir_solver.cpp b/src/psm/src/ir_solver.cpp
+--- a/src/psm/src/ir_solver.cpp
++++ b/src/psm/src/ir_solver.cpp
+@@ -50,12 +50,13 @@
+     utl::Logger* logger,
+     const UserVoltages& user_voltages,
+     const UserPowers& user_powers,
+-    const PDNSim::GeneratedSourceSettings& generated_source_settings)
++    const PDNSim::GeneratedSourceSettings& generated_source_settings,
++    bool connectivity_only)
+     : net_(net),
+       logger_(logger),
+       estimate_parasitics_(estimate_parasitics),
+       sta_(sta),
+-      network_(new IRNetwork(net_, logger_, floorplanning)),
++      network_(new IRNetwork(net_, logger_, floorplanning, connectivity_only)),
+       gui_(nullptr),
+       user_voltages_(user_voltages),
+       user_powers_(user_powers),
+@@ -999,8 +1000,9 @@
+ {
+   const utl::DebugScopedTimer timer(logger_, utl::PSM, "timer", 1, "Solve: {}");
+ 
+-  if (network_->isFloorplanningOnly()) {
++  if (network_->isFloorplanningOnly() || network_->isConnectivityOnly()) {
+     network_->setFloorplanning(false);
++    network_->setConnectivityOnly(false);
+     network_->construct();
+   }
+ 
+diff --git a/src/psm/src/ir_solver.h b/src/psm/src/ir_solver.h
+--- a/src/psm/src/ir_solver.h
++++ b/src/psm/src/ir_solver.h
+@@ -75,7 +75,8 @@
+            utl::Logger* logger,
+            const UserVoltages& user_voltages,
+            const UserPowers& user_powers,
+-           const PDNSim::GeneratedSourceSettings& generated_source_settings);
++           const PDNSim::GeneratedSourceSettings& generated_source_settings,
++           bool connectivity_only = false);
+ 
+   odb::dbNet* getNet() const { return net_; };
+ 
+diff --git a/src/psm/src/pdnsim.cpp b/src/psm/src/pdnsim.cpp
+--- a/src/psm/src/pdnsim.cpp
++++ b/src/psm/src/pdnsim.cpp
+@@ -117,9 +117,10 @@
+ bool PDNSim::checkConnectivity(odb::dbNet* net,
+                                bool floorplanning,
+                                const std::string& error_file,
+-                               bool require_bterm)
+-{
+-  auto* solver = getIRSolver(net, floorplanning);
++                               bool require_bterm,
++                               bool connectivity_only)
++{
++  auto* solver = getIRSolver(net, floorplanning, connectivity_only);
+   const bool check = solver->check(require_bterm);
+   solver->writeErrorFile(error_file);
+ 
+@@ -151,9 +152,18 @@
+   solver->writeSpiceFile(source_type, spice_file, corner, voltage_source_file);
+ }
+ 
+-psm::IRSolver* PDNSim::getIRSolver(odb::dbNet* net, bool floorplanning)
++psm::IRSolver* PDNSim::getIRSolver(odb::dbNet* net,
++                                   bool floorplanning,
++                                   bool connectivity_only)
+ {
+   auto& solver = solvers_[net];
++  const bool had_solver = solver != nullptr;
++  // Never reuse a connectivity contraction for electrical analysis or SPICE.
++  // An existing full network can still answer connectivity without rebuilding.
++  if (solver && !connectivity_only
++      && solver->getNetwork()->isConnectivityOnly()) {
++    solver.reset();
++  }
+   if (solver == nullptr) {
+     solver = std::make_unique<IRSolver>(net,
+                                         floorplanning,
+@@ -162,8 +172,11 @@
+                                         logger_,
+                                         user_voltages_,
+                                         user_powers_,
+-                                        generated_source_settings_);
+-    addOwner(net->getBlock());
++                                        generated_source_settings_,
++                                        connectivity_only);
++    if (!had_solver) {
++      addOwner(net->getBlock());
++    }
+   }
+ 
+   return solver.get();
+diff --git a/src/psm/src/pdnsim.i b/src/psm/src/pdnsim.i
+--- a/src/psm/src/pdnsim.i
++++ b/src/psm/src/pdnsim.i
+@@ -79,7 +79,7 @@
+ check_connectivity_cmd(odb::dbNet* net, bool floorplanning, const char* error_file, bool dont_require_bterm)
+ {
+   PDNSim* pdnsim = getPDNSim();
+-  return pdnsim->checkConnectivity(net, floorplanning, error_file, !dont_require_bterm);
++  return pdnsim->checkConnectivity(net, floorplanning, error_file, !dont_require_bterm, true);
+ }
+ 
+ void
+diff --git a/src/psm/test/BUILD b/src/psm/test/BUILD
+--- a/src/psm/test/BUILD
++++ b/src/psm/test/BUILD
+@@ -1,3 +1,4 @@
++load("@rules_cc//cc:cc_test.bzl", "cc_test")
+ load("@rules_python//python:defs.bzl", "py_test")
+ 
+ # SPDX-License-Identifier: BSD-3-Clause
+@@ -203,3 +204,18 @@
+     ],
+     visibility = ["//src/drt/test:__pkg__"],
+ )
++
++cc_test(
++    name = "via_connectivity_unittest",
++    linkstatic = True,
++    srcs = ["via_connectivity.cpp"],
++    features = ["-layering_check"],
++    deps = ["//src/psm", "//src/odb/src/db", "//src/utl", "@googletest//:gtest_main"],
++)
++
++regression_test(
++    name = "check_then_analyze",
++    data = [":regression_resources"],
++    check_log = False,
++    check_passfail = True,
++)
+diff --git a/src/psm/test/check_then_analyze.tcl b/src/psm/test/check_then_analyze.tcl
+new file mode 100644
+--- /dev/null
++++ b/src/psm/test/check_then_analyze.tcl
+@@ -0,0 +1,26 @@
++# Connectivity-only contact contraction must never leak into an electrical solve.
++source helpers.tcl
++read_lef Nangate45/Nangate45.lef
++read_def Nangate45_data/gcd.def
++read_liberty Nangate45/Nangate45_typ.lib
++read_sdc Nangate45_data/gcd.sdc
++proc same_contents {left right} {
++  set f [open $left]; set a [read $f]; close $f
++  set f [open $right]; set b [read $f]; close $f
++  if {$a ne $b} {error "Electrical results differ: $left / $right"}
++}
++set direct_voltage [make_result_file direct.csv]
++set checked_voltage [make_result_file checked.csv]
++set direct_spice [make_result_file direct.sp]
++set checked_spice [make_result_file checked.sp]
++analyze_power_grid -net VDD -vsrc Vsrc_gcd_vdd.loc -voltage_file $direct_voltage
++write_pg_spice -net VDD -vsrc Vsrc_gcd_vdd.loc $direct_spice
++psm::clear_solvers
++check_power_grid -net VDD -dont_require_terminals
++analyze_power_grid -net VDD -vsrc Vsrc_gcd_vdd.loc -voltage_file $checked_voltage -allow_reuse
++# A check on an already solved network must retain the full network and solution.
++check_power_grid -net VDD -dont_require_terminals
++write_pg_spice -net VDD -vsrc Vsrc_gcd_vdd.loc $checked_spice
++same_contents $direct_voltage $checked_voltage
++same_contents $direct_spice $checked_spice
++puts "pass"
+diff --git a/src/psm/test/via_connectivity.cpp b/src/psm/test/via_connectivity.cpp
+new file mode 100644
+--- /dev/null
++++ b/src/psm/test/via_connectivity.cpp
+@@ -0,0 +1,135 @@
++// SPDX-License-Identifier: BSD-3-Clause
++#include <set>
++#include <unordered_map>
++#include <vector>
++
++#include "gtest/gtest.h"
++#include "ir_network.h"
++#include "odb/db.h"
++#include "shape.h"
++#include "utl/Logger.h"
++
++namespace psm {
++namespace {
++size_t components(const IRNetwork& network)
++{
++  std::unordered_map<Node*, std::vector<Node*>> adjacent;
++  for (const auto& [layer, nodes] : network.getNodes()) {
++    for (const auto& node : nodes) {
++      adjacent[node.get()];
++    }
++  }
++  for (const auto& edge : network.getConnections()) {
++    adjacent[edge->getNode0()].push_back(edge->getNode1());
++    adjacent[edge->getNode1()].push_back(edge->getNode0());
++  }
++  std::set<Node*> seen;
++  size_t count = 0;
++  for (const auto& [root, unused] : adjacent) {
++    if (!seen.insert(root).second) {
++      continue;
++    }
++    ++count;
++    std::vector<Node*> pending{root};
++    while (!pending.empty()) {
++      auto* node = pending.back();
++      pending.pop_back();
++      for (auto* next : adjacent.at(node)) {
++        if (seen.insert(next).second) {
++          pending.push_back(next);
++        }
++      }
++    }
++  }
++  return count;
++}
++
++class ViaConnectivity : public testing::Test
++{
++ protected:
++  utl::Logger logger;
++  odb::dbDatabase* db = nullptr;
++  odb::dbBlock* block = nullptr;
++  odb::dbTechLayer *lower = nullptr, *cut = nullptr, *upper = nullptr;
++  void SetUp() override
++  {
++    db = odb::dbDatabase::create();
++    auto* tech = odb::dbTech::create(db, "tech");
++    tech->setLefUnits(1000);
++    lower = odb::dbTechLayer::create(tech, "M1", odb::dbTechLayerType::ROUTING);
++    cut = odb::dbTechLayer::create(tech, "V1", odb::dbTechLayerType::CUT);
++    upper = odb::dbTechLayer::create(tech, "M2", odb::dbTechLayerType::ROUTING);
++    lower->setPitch(10);
++    upper->setPitch(10);
++    block = odb::dbBlock::create(odb::dbChip::create(db, tech), "top");
++    block->setDieArea(odb::Rect(0, 0, 100000, 100000));
++  }
++  void TearDown() override { odb::dbDatabase::destroy(db); }
++  odb::dbVia* via(bool split)
++  {
++    auto* via = odb::dbVia::create(block, "array");
++    for (auto* layer : {lower, upper}) {
++      if (split) {
++        odb::dbBox::create(via, layer, 0, 0, 10000, 40);
++        odb::dbBox::create(via, layer, 16000, 0, 25600, 40);
++      } else {
++        odb::dbBox::create(via, layer, 0, 0, 25600, 40);
++      }
++    }
++    for (int x = 10; x < 25600; x += 400) {
++      if (!split || x < 9900 || x > 16000) {
++        odb::dbBox::create(via, cut, x, 10, x + 10, 20);
++      }
++    }
++    return via;
++  }
++  odb::dbNet* install(odb::dbVia* via)
++  {
++    auto* net = odb::dbNet::create(block, "VDD");
++    net->setSigType(odb::dbSigType::POWER);
++    auto* wire = odb::dbSWire::create(net, odb::dbWireType::ROUTED);
++    odb::dbSBox::create(wire, via, 1000, 1000, odb::dbWireShapeType::STRIPE);
++    // A second translated instance exercises the definition cache. It remains
++    // disconnected: contracting the via must not connect separate instances.
++    odb::dbSBox::create(wire, via, 40000, 2000, odb::dbWireShapeType::STRIPE);
++    return net;
++  }
++};
++TEST_F(ViaConnectivity,
++       ContinuousPlatesContractAndElectricalRebuildRestoresNodes)
++{
++  auto* net = install(via(false));
++  IRNetwork full(net, &logger, false);
++  IRNetwork compact(net, &logger, false, true);
++  EXPECT_EQ(components(full), 2);
++  EXPECT_EQ(components(compact), components(full));
++  EXPECT_LT(compact.getNodes().at(lower).size(),
++            full.getNodes().at(lower).size());
++  compact.setConnectivityOnly(false);
++  compact.construct();
++  EXPECT_EQ(compact.getNodeCount(), full.getNodeCount());
++  EXPECT_EQ(compact.getConnections().size(), full.getConnections().size());
++}
++TEST_F(ViaConnectivity, SplitPlatesRetainDisconnectedComponents)
++{
++  auto* net = install(via(true));
++  IRNetwork full(net, &logger, false);
++  IRNetwork compact(net, &logger, false, true);
++  EXPECT_EQ(components(full), 4);
++  EXPECT_EQ(components(compact), components(full));
++  EXPECT_EQ(compact.getNodeCount(), full.getNodeCount());
++}
++TEST_F(ViaConnectivity, UnenclosedCutAndReconstructionInvalidateProof)
++{
++  auto* definition = via(false);
++  auto* net = install(definition);
++  IRNetwork compact(net, &logger, false, true);
++  odb::dbBox::create(definition, cut, 30000, 10, 30010, 20);
++  compact.construct();
++  IRNetwork full(net, &logger, false);
++  EXPECT_EQ(components(compact), components(full));
++  EXPECT_GT(components(compact), 2);
++  EXPECT_EQ(compact.getNodeCount(), full.getNodeCount());
++}
++}  // namespace
++}  // namespace psm

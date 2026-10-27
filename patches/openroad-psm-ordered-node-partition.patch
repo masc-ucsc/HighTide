@@ -1,0 +1,44 @@
+diff --git a/src/psm/src/node.cpp b/src/psm/src/node.cpp
+--- a/src/psm/src/node.cpp
++++ b/src/psm/src/node.cpp
+@@ -25,10 +25,12 @@
+   }
+ 
+   // Compare layer
+-  const int layer1 = layer_->getNumber();
+-  const int layer2 = other->layer_->getNumber();
+-  if (layer1 != layer2) {
+-    return layer1 < layer2 ? -1 : 1;
++  if (layer_ != other->layer_) {
++    const int layer1 = layer_->getNumber();
++    const int layer2 = other->layer_->getNumber();
++    if (layer1 != layer2) {
++      return layer1 < layer2 ? -1 : 1;
++    }
+   }
+ 
+   // Compare x coordinate
+diff --git a/src/psm/src/shape.cpp b/src/psm/src/shape.cpp
+--- a/src/psm/src/shape.cpp
++++ b/src/psm/src/shape.cpp
+@@ -146,9 +146,9 @@
+   for (auto* node : sorted_nodes) {
+     const auto& pt = node->getPoint();
+     if (pt.x() == shape_center.x() || pt.y() == shape_center.y()) {
+-      center_nodes.insert(node);
++      center_nodes.insert(center_nodes.end(), node);
+     } else {
+-      non_center_nodes.insert(node);
++      non_center_nodes.insert(non_center_nodes.end(), node);
+     }
+   }
+ 
+@@ -193,7 +193,7 @@
+   for (auto* node : nodes) {
+     if (shared_nodes.find(node) != shared_nodes.end()) {
+       // don't consider shared nodes
+-      shape_shared_nodes.insert(node);
++      shape_shared_nodes.insert(shape_shared_nodes.end(), node);
+       continue;
+     }
+     auto data = std::make_unique<NodeData>();

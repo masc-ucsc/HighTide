@@ -1,0 +1,34 @@
+diff --git a/src/drt/src/dr/FlexDR_maze.cpp b/src/drt/src/dr/FlexDR_maze.cpp
+--- a/src/drt/src/dr/FlexDR_maze.cpp
++++ b/src/drt/src/dr/FlexDR_maze.cpp
+@@ -768,6 +768,10 @@
+   frCoord bloatDist = getTech()->getLayer(lNum)->getMinSpacingValue(
+       width1, width2, prl, use_min_spacing);
+   bloatDist = std::max(minSpacing, bloatDist);
++  // Widths, layer and blockage policy are constant for this helper call.
++  // Adjacent maze points often repeat PRL; reuse only exact matching queries.
++  frCoord last_prl = prl;
++  frCoord last_spacing = bloatDist;
+   frCoord bloatDistEolX = 0;
+   frCoord bloatDistEolY = 0;
+   if (drCon.eolWidth == 0) {
+@@ -832,11 +836,14 @@
+           }
+         }
+       }
+-      bool use_min_spacing
+-          = isBlockage && router_cfg_->USEMINSPACING_OBS && !isFatVia;
+-      frCoord reqDist = getTech()->getLayer(lNum)->getMinSpacingValue(
+-          width1, width2, prl, use_min_spacing);
+-      reqDist = std::max(reqDist, minSpacing);
++      if (prl != last_prl) {
++        last_spacing = std::max(
++            minSpacing,
++            getTech()->getLayer(lNum)->getMinSpacingValue(
++                width1, width2, prl, use_min_spacing));
++        last_prl = prl;
++      }
++      const frCoord reqDist = last_spacing;
+       if (distSquare < (frSquaredDistance) reqDist * reqDist) {
+         switch (type) {
+           case subRouteShape:

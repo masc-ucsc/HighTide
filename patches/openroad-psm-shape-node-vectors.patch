@@ -1,0 +1,77 @@
+diff --git a/src/psm/src/shape.cpp b/src/psm/src/shape.cpp
+--- a/src/psm/src/shape.cpp
++++ b/src/psm/src/shape.cpp
+@@ -3,6 +3,7 @@
+ 
+ #include "shape.h"
+ 
++#include <algorithm>
+ #include <cmath>
+ #include <functional>
+ #include <iterator>
+@@ -120,14 +121,23 @@
+   return new_nodes;
+ }
+ 
+-Node::NodeSet Shape::getNodes(const IRNetwork::NodeTree& layer_nodes) const
+-{
+-  return Node::NodeSet(
++std::vector<Node*> Shape::getNodes(const IRNetwork::NodeTree& layer_nodes) const
++{
++  std::vector<Node*> nodes(
+       layer_nodes.qbegin(boost::geometry::index::intersects(shape_)),
+       layer_nodes.qend());
+-}
+-
+-IRNetwork::NodeTree Shape::getNodeTree(const Node::NodeSet& nodes) const
++  // Preserve the ordered set's sequence and its first-inserted representative
++  // for comparator-equivalent nodes, without a tree allocation per node.
++  const Node::Compare compare;
++  std::stable_sort(nodes.begin(), nodes.end(), compare);
++  const auto last = std::unique(nodes.begin(), nodes.end(), [&](Node* a, Node* b) {
++    return !compare(a, b) && !compare(b, a);
++  });
++  nodes.erase(last, nodes.end());
++  return nodes;
++}
++
++IRNetwork::NodeTree Shape::getNodeTree(const std::vector<Node*>& nodes) const
+ {
+   return IRNetwork::NodeTree(nodes.begin(), nodes.end());
+ }
+@@ -139,7 +149,7 @@
+     const std::set<Node*>& shared_nodes)
+ {
+   // Process and filter nodes
+-  const Node::NodeSet sorted_nodes = getNodes(layer_nodes);
++  const auto sorted_nodes = getNodes(layer_nodes);
+   Node::NodeSet center_nodes;
+   Node::NodeSet non_center_nodes;
+   const odb::Point shape_center = shape_.center();
+@@ -184,7 +194,7 @@
+ }
+ 
+ Shape::NodeDataTree Shape::createNodeDataValue(
+-    const Node::NodeSet& nodes,
++    const std::vector<Node*>& nodes,
+     const std::set<Node*>& shared_nodes,
+     std::vector<std::unique_ptr<NodeData>>& container,
+     Node::NodeSet& shape_shared_nodes) const
+diff --git a/src/psm/src/shape.h b/src/psm/src/shape.h
+--- a/src/psm/src/shape.h
++++ b/src/psm/src/shape.h
+@@ -61,11 +61,11 @@
+                                       boost::geometry::index::quadratic<16>,
+                                       PointIndexableGetter<NodeData>>;
+ 
+-  Node::NodeSet getNodes(const IRNetwork::NodeTree& layer_nodes) const;
+-  IRNetwork::NodeTree getNodeTree(const Node::NodeSet& nodes) const;
++  std::vector<Node*> getNodes(const IRNetwork::NodeTree& layer_nodes) const;
++  IRNetwork::NodeTree getNodeTree(const std::vector<Node*>& nodes) const;
+ 
+   NodeDataTree createNodeDataValue(
+-      const Node::NodeSet& nodes,
++      const std::vector<Node*>& nodes,
+       const std::set<Node*>& shared_nodes,
+       std::vector<std::unique_ptr<NodeData>>& container,
+       Node::NodeSet& shape_shared_nodes) const;

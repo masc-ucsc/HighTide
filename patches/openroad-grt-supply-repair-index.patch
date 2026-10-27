@@ -1,0 +1,17 @@
+--- a/src/grt/src/GlobalRouter.cpp
++++ b/src/grt/src/GlobalRouter.cpp
+@@ -5534,8 +5534,12 @@
+       }
+     }
+     applyObstructionAdjustment(obstruction_rect, tech_layer);
+-    // Save position where the net's wires reduced resources
+-    savePositionWithReducedResources(obstruction_rect, tech_layer, db_net);
++    // This index only selects signal nets for congestion repair. Supply
++    // obstructions still reduce capacity above, but getCongestionNets always
++    // excludes them, so storing their many repeated grid entries is wasted.
++    if (!db_net->getSigType().isSupply()) {
++      savePositionWithReducedResources(obstruction_rect, tech_layer, db_net);
++    }
+   }
+ }
+ 

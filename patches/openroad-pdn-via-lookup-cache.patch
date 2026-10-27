@@ -1,0 +1,318 @@
+diff --git a/src/pdn/src/connect.cpp b/src/pdn/src/connect.cpp
+--- a/src/pdn/src/connect.cpp
++++ b/src/pdn/src/connect.cpp
+@@ -489,7 +489,8 @@
+                       const ShapePtr& lower,
+                       const ShapePtr& upper,
+                       const odb::dbWireShapeType& type,
+-                      DbVia::ViaLayerShape& shapes)
++                      DbVia::ViaLayerShape& shapes,
++                      ViaLookup& via_lookup)
+ {
+   const odb::Rect& lower_rect = lower->getRect();
+   const odb::Rect& upper_rect = upper->getRect();
+@@ -535,8 +536,14 @@
+                     y / static_cast<double>(tech->getDbUnitsPerMicron()),
+                     tech->getManufacturingGrid()
+                         / static_cast<double>(tech->getDbUnitsPerMicron())));
+-    dummy_via.generate(
+-        wire->getBlock(), wire, type, 0, 0, ongrid_, grid_->getLogger());
++    dummy_via.generate(wire->getBlock(),
++                       wire,
++                       type,
++                       0,
++                       0,
++                       ongrid_,
++                       grid_->getLogger(),
++                       via_lookup);
+     return;
+   }
+ 
+@@ -647,8 +654,14 @@
+         stack, layer0_, wire->getBlock());
+   }
+ 
+-  shapes = via->generate(
+-      wire->getBlock(), wire, type, x, y, ongrid_, grid_->getLogger());
++  shapes = via->generate(wire->getBlock(),
++                         wire,
++                         type,
++                         x,
++                         y,
++                         ongrid_,
++                         grid_->getLogger(),
++                         via_lookup);
+ 
+   if (skip_caching) {
+     via = nullptr;
+diff --git a/src/pdn/src/connect.h b/src/pdn/src/connect.h
+--- a/src/pdn/src/connect.h
++++ b/src/pdn/src/connect.h
+@@ -82,7 +82,8 @@
+                const ShapePtr& lower,
+                const ShapePtr& upper,
+                const odb::dbWireShapeType& type,
+-               DbVia::ViaLayerShape& via_shapes);
++               DbVia::ViaLayerShape& via_shapes,
++               ViaLookup& via_lookup);
+ 
+   void setGrid(Grid* grid) { grid_ = grid; }
+   Grid* getGrid() const { return grid_; }
+diff --git a/src/pdn/src/grid.cpp b/src/pdn/src/grid.cpp
+--- a/src/pdn/src/grid.cpp
++++ b/src/pdn/src/grid.cpp
+@@ -1023,6 +1023,7 @@
+     const odb::PtrMap<odb::dbNet, odb::dbBTerm*>& bterm_map,
+     const Shape::ObstructionTreeMap& obstructions) const
+ {
++  ViaLookup via_lookup;
+   // write vias first do shapes can be adjusted if needed
+   std::vector<ViaPtr> vias;
+   getVias(vias);
+@@ -1048,7 +1049,7 @@
+     if (net == net_map.end()) {
+       continue;
+     }
+-    via->writeToDb(net->second, getBlock(), obstructions);
++    via->writeToDb(net->second, getBlock(), obstructions, via_lookup);
+   }
+   for (const auto& connect : connect_) {
+     connect->printViaReport();
+diff --git a/src/pdn/src/via.cpp b/src/pdn/src/via.cpp
+--- a/src/pdn/src/via.cpp
++++ b/src/pdn/src/via.cpp
+@@ -381,7 +381,8 @@
+     int x,
+     int y,
+     const odb::PtrSet<odb::dbTechLayer>& ongrid,
+-    utl::Logger* logger)
++    utl::Logger* logger,
++    ViaLookup& via_lookup)
+ {
+   TechLayer bottom(via_->getBottomLayer());
+   TechLayer top(via_->getTopLayer());
+@@ -431,7 +432,11 @@
+ 
+   if (isArray()) {
+     const std::string via_name = getViaName(ongrid);
+-    auto* bvia = block->findVia(via_name.c_str());
++    auto [entry, inserted] = via_lookup.try_emplace(via_name, nullptr);
++    auto*& bvia = entry->second;
++    if (inserted) {
++      bvia = block->findVia(via_name.c_str());
++    }
+ 
+     new_via_center
+         = odb::Point(col_snap->snapToGrid(x), row_snap->snapToGrid(y));
+@@ -653,10 +658,15 @@
+     int x,
+     int y,
+     const odb::PtrSet<odb::dbTechLayer>& ongrid,
+-    utl::Logger* logger)
++    utl::Logger* logger,
++    ViaLookup& via_lookup)
+ {
+   const std::string via_name = getViaName();
+-  auto* via = block->findVia(via_name.c_str());
++  auto [entry, inserted] = via_lookup.try_emplace(via_name, nullptr);
++  auto*& via = entry->second;
++  if (inserted) {
++    via = block->findVia(via_name.c_str());
++  }
+ 
+   if (via == nullptr) {
+     const int cut_width = cut_rect_.dx();
+@@ -760,7 +770,8 @@
+     int x,
+     int y,
+     const odb::PtrSet<odb::dbTechLayer>& ongrid,
+-    utl::Logger* logger)
++    utl::Logger* logger,
++    ViaLookup& via_lookup)
+ {
+   const odb::Rect core_via_rect = core_via_->getViaRect(false, true);
+   ViaLayerShape via_shapes;
+@@ -786,8 +797,8 @@
+         }
+       }
+ 
+-      auto shapes
+-          = via->generate(block, wire, type, array_x, array_y, ongrid, logger);
++      auto shapes = via->generate(
++          block, wire, type, array_x, array_y, ongrid, logger, via_lookup);
+       combineLayerShapes(shapes, via_shapes);
+ 
+       last_via_rect = via->getViaRect(false, true);
+@@ -851,7 +862,8 @@
+     int x,
+     int y,
+     const odb::PtrSet<odb::dbTechLayer>& ongrid,
+-    utl::Logger* logger)
++    utl::Logger* logger,
++    ViaLookup& via_lookup)
+ {
+   TechLayer* horizontal = nullptr;
+   TechLayer* vertical = nullptr;
+@@ -879,8 +891,8 @@
+     for (int c = 0; c < cols_; c++) {
+       const int col_pos = vertical->snapToGrid(col);
+ 
+-      auto shapes
+-          = via_->generate(block, wire, type, col_pos, row_pos, ongrid, logger);
++      auto shapes = via_->generate(
++          block, wire, type, col_pos, row_pos, ongrid, logger, via_lookup);
+       combineLayerShapes(shapes, via_shapes);
+ 
+       col = col_pos + col_pitch_;
+@@ -927,7 +939,8 @@
+     int x,
+     int y,
+     const odb::PtrSet<odb::dbTechLayer>& ongrid,
+-    utl::Logger* logger)
++    utl::Logger* logger,
++    ViaLookup& via_lookup)
+ {
+   for (const auto& layer : layers_) {
+     if (ongrid.find(layer->getLayer()) != ongrid.end()) {
+@@ -974,8 +987,8 @@
+       layer_y = layer_upper->snapToGrid(layer_y);
+     }
+ 
+-    auto shapes
+-        = via->generate(block, wire, type, layer_x, layer_y, ongrid, logger);
++    auto shapes = via->generate(
++        block, wire, type, layer_x, layer_y, ongrid, logger, via_lookup);
+     if (i == 0) {
+       via_shapes.bottom = shapes.bottom;
+     }
+@@ -1131,7 +1144,8 @@
+     int x,
+     int y,
+     const odb::PtrSet<odb::dbTechLayer>& ongrid,
+-    utl::Logger* logger)
++    utl::Logger* logger,
++    ViaLookup& /* via_lookup */)
+ {
+   odb::dbTransform xfm({x, y});
+ 
+@@ -2950,7 +2964,8 @@
+ 
+ void Via::writeToDb(odb::dbSWire* wire,
+                     odb::dbBlock* block,
+-                    const Shape::ObstructionTreeMap& obstructions)
++                    const Shape::ObstructionTreeMap& obstructions,
++                    ViaLookup& via_lookup)
+ {
+   odb::dbWireShapeType type = lower_->getType();
+ 
+@@ -2960,7 +2975,7 @@
+   }
+ 
+   DbVia::ViaLayerShape shapes;
+-  connect_->makeVia(wire, lower_, upper_, type, shapes);
++  connect_->makeVia(wire, lower_, upper_, type, shapes, via_lookup);
+ 
+   if (shapes.bottom.empty() && shapes.middle.empty() && shapes.top.empty()) {
+     markFailed(FailedViaReason::kBuild);
+diff --git a/src/pdn/src/via.h b/src/pdn/src/via.h
+--- a/src/pdn/src/via.h
++++ b/src/pdn/src/via.h
+@@ -9,6 +9,7 @@
+ #include <memory>
+ #include <set>
+ #include <string>
++#include <unordered_map>
+ #include <utility>
+ #include <vector>
+ 
+@@ -90,6 +91,10 @@
+   void swap(odb::dbTechLayer* layer);
+ };
+ 
++// Per-grid emission scratch state. Block via definitions are only added during
++// this scope; the map is discarded before any database reload or via deletion.
++using ViaLookup = std::unordered_map<std::string, odb::dbVia*>;
++
+ // Wrapper class to handle building actual ODB DB Vias
+ class DbVia
+ {
+@@ -112,7 +117,8 @@
+                                  int x,
+                                  int y,
+                                  const odb::PtrSet<odb::dbTechLayer>& ongrid,
+-                                 utl::Logger* logger)
++                                 utl::Logger* logger,
++                                 ViaLookup& via_lookup)
+       = 0;
+ 
+   virtual bool requiresPatch() const { return false; }
+@@ -193,7 +199,8 @@
+                          int x,
+                          int y,
+                          const odb::PtrSet<odb::dbTechLayer>& ongrid,
+-                         utl::Logger* logger) override;
++                         utl::Logger* logger,
++                         ViaLookup& via_lookup) override;
+ 
+   bool requiresPatch() const override { return rows_ > 1 || cols_ > 1; }
+ 
+@@ -252,7 +259,8 @@
+                          int x,
+                          int y,
+                          const odb::PtrSet<odb::dbTechLayer>& ongrid,
+-                         utl::Logger* logger) override;
++                         utl::Logger* logger,
++                         ViaLookup& via_lookup) override;
+ 
+   std::string getName() const override;
+   odb::Rect getViaRect(bool include_enclosure,
+@@ -307,7 +315,8 @@
+                          int x,
+                          int y,
+                          const odb::PtrSet<odb::dbTechLayer>& ongrid,
+-                         utl::Logger* logger) override;
++                         utl::Logger* logger,
++                         ViaLookup& via_lookup) override;
+ 
+   ViaReport getViaReport() const override;
+ 
+@@ -343,7 +352,8 @@
+                          int x,
+                          int y,
+                          const odb::PtrSet<odb::dbTechLayer>& ongrid,
+-                         utl::Logger* logger) override;
++                         utl::Logger* logger,
++                         ViaLookup& via_lookup) override;
+ 
+   bool requiresPatch() const override { return true; }
+ 
+@@ -378,7 +388,8 @@
+                          int x,
+                          int y,
+                          const odb::PtrSet<odb::dbTechLayer>& ongrid,
+-                         utl::Logger* logger) override;
++                         utl::Logger* logger,
++                         ViaLookup& via_lookup) override;
+ 
+   ViaReport getViaReport() const override;
+ 
+@@ -405,7 +416,8 @@
+                          int x,
+                          int y,
+                          const odb::PtrSet<odb::dbTechLayer>& ongrid,
+-                         utl::Logger* logger) override;
++                         utl::Logger* logger,
++                         ViaLookup& via_lookup) override;
+ 
+   ViaReport getViaReport() const override { return {}; }
+ 
+@@ -751,7 +763,8 @@
+ 
+   void writeToDb(odb::dbSWire* wire,
+                  odb::dbBlock* block,
+-                 const Shape::ObstructionTreeMap& obstructions);
++                 const Shape::ObstructionTreeMap& obstructions,
++                 ViaLookup& via_lookup);
+ 
+   Grid* getGrid() const;
+ 

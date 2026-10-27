@@ -1,0 +1,83 @@
+diff --git a/src/drt/src/dr/FlexDR.h b/src/drt/src/dr/FlexDR.h
+--- a/src/drt/src/dr/FlexDR.h
++++ b/src/drt/src/dr/FlexDR.h
+@@ -313,6 +313,8 @@
+ class FlexGCWorker;
+ class FlexDRWorker
+ {
++  friend class GCFixture_corner_repair_preserves_fixed_wire_Test;
++
+  public:
+   // constructors
+   FlexDRWorker(FlexDRViaData* via_data,
+diff --git a/src/drt/src/gc/FlexGC_main.cpp b/src/drt/src/gc/FlexGC_main.cpp
+--- a/src/drt/src/gc/FlexGC_main.cpp
++++ b/src/drt/src/gc/FlexGC_main.cpp
+@@ -3521,6 +3521,11 @@
+     drConnFig* obj = nullptr;
+     for (auto connFig : results) {
+       net = connFig->getNet();
++      // FIXED signal metal must survive routing byte-for-byte. A temporary
++      // patch on that net would hide a violation that remains after writeback.
++      if (net->isFixed()) {
++        continue;
++      }
+       if (sourceNets.find(net->getFrNet()) == sourceNets.end()) {
+         continue;
+       }
+diff --git a/src/drt/test/gcTest.cpp b/src/drt/test/gcTest.cpp
+--- a/src/drt/test/gcTest.cpp
++++ b/src/drt/test/gcTest.cpp
+@@ -16,6 +16,7 @@
+ #include "frBaseTypes.h"
+ #include "frDesign.h"
+ #include "gc/FlexGC.h"
++#include "dr/FlexDR.h"
+ #include "gtest/gtest.h"
+ #include "odb/db.h"
+ #include "odb/dbTypes.h"
+@@ -282,6 +283,44 @@
+              2,
+              frConstraintTypeEnum::frcLef58CornerSpacingConstraint,
+              odb::Rect(500, 50, 500, 150));
++}
++
++
++// Surgical corner repair must never propose a patch on immutable signal metal.
++TEST_F(GCFixture, corner_repair_preserves_fixed_wire)
++{
++  makeCornerConstraint(2);
++  // ASAP7 has MINSTEP rules, which activate the surgical repair pass.
++  makeMinStepConstraint(2);
++  auto* fixed = makeNet("fixed");
++  fixed->setFixed(true);
++  auto* routed = makeNet("routed");
++  makePathseg(fixed, 2, {100, 100}, {600, 100});
++  makePathseg(routed, 2, {600, 300}, {1100, 300});
++  initRegionQuery();
++  FlexDRWorker dr_worker(nullptr, design.get(), logger.get(), router_cfg.get());
++  const odb::Rect box(0, 0, 2000, 2000);
++  dr_worker.setRouteBox(box);
++  for (auto* net : {fixed, routed}) {
++    auto dr_net = std::make_unique<drNet>(net, router_cfg.get());
++    for (const auto& shape : net->getShapes()) {
++      dr_net->addRoute(std::make_unique<drPathSeg>(
++          *static_cast<frPathSeg*>(shape.get())));
++    }
++    dr_worker.initNet_addNet(std::move(dr_net));
++  }
++  dr_worker.getWorkerRegionQuery().init();
++  FlexGCWorker gc(design->getTech(), logger.get(), router_cfg.get(), &dr_worker);
++  gc.setExtBox(box);
++  gc.setDrcBox(box);
++  gc.setEnableSurgicalFix(true);
++  gc.init(design.get());
++  gc.main();
++  ASSERT_FALSE(gc.getPWires().empty());
++  for (const auto& patch : gc.getPWires()) {
++    EXPECT_FALSE(patch->getNet()->isFixed());
++    EXPECT_EQ(patch->getNet()->getFrNet(), routed);
++  }
+ }
+ 
+ // Check no violation for corner spacing with EOL spacing

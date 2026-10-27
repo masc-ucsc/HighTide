@@ -1,0 +1,47 @@
+--- a/src/psm/src/ir_network.cpp
++++ b/src/psm/src/ir_network.cpp
+@@ -713,30 +713,21 @@
+     }
+   }
+ 
+-  std::vector<std::unique_ptr<Node>> loop_via_nodes;
+-  Connections loop_via_connections;
++  // Transfer each via directly to its final layer. Keeping full-network
++  // temporary vectors duplicates hundreds of millions of pointer slots on
++  // large grids, even though only one via's nodes need redistribution at once.
++  std::vector<std::unique_ptr<Node>> via_nodes;
++  Connections via_connections;
+   for (odb::dbSBox* box : boxes) {
+-    generateCutNodesForSBox(
+-        box, use_single_via, loop_via_nodes, loop_via_connections);
+-  }
+-  boxes.clear();
+-
+-  LayerMap<std::vector<std::unique_ptr<Node>>> via_nodes;
+-  for (auto& node : loop_via_nodes) {
+-    via_nodes[node->getLayer()].push_back(std::move(node));
+-  }
+-  for (auto& connection : loop_via_connections) {
+-    connections_.push_back(std::move(connection));
+-  }
+-  loop_via_nodes.clear();
+-  loop_via_connections.clear();
+-
+-  for (auto& [layer, nodes] : via_nodes) {
+-    // move vias to nodes_
+-    auto& global_nodes = nodes_[layer];
+-    for (auto& node : nodes) {
+-      global_nodes.push_back(std::move(node));
+-    }
++    generateCutNodesForSBox(box, use_single_via, via_nodes, via_connections);
++    for (auto& node : via_nodes) {
++      nodes_[node->getLayer()].push_back(std::move(node));
++    }
++    for (auto& connection : via_connections) {
++      connections_.push_back(std::move(connection));
++    }
++    via_nodes.clear();
++    via_connections.clear();
+   }
+ }
+ 

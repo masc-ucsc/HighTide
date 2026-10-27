@@ -1,0 +1,128 @@
+--- a/src/grt/src/fastroute/src/maze.cpp
++++ b/src/grt/src/fastroute/src/maze.cpp
+@@ -416,7 +416,20 @@
+ }
+ 
+ // non recursive version of heapify
+-static void heapify(std::vector<double*>& array)
++// Duplicate source entries retain the legacy first-occurrence lookup. Other
++// entries have a direct index, maintained by the unchanged heap comparisons.
++using HeapPositions = std::unordered_map<double*, int>;
++static constexpr int duplicate_position = -2;
++
++static void recordHeapPosition(HeapPositions& positions, double* value, int index)
++{
++  auto& position = positions.at(value);
++  if (position != duplicate_position) {
++    position = index;
++  }
++}
++
++static void heapify(std::vector<double*>& array, HeapPositions& positions)
+ {
+   bool stop = false;
+   const int heapSize = array.size();
+@@ -441,30 +454,42 @@
+     }
+     if (smallest != i) {
+       array[i] = array[smallest];
++      recordHeapPosition(positions, array[i], i);
+       i = smallest;
+     } else {
+       array[i] = tmp;
++      recordHeapPosition(positions, tmp, i);
+       stop = true;
+     }
+   } while (!stop);
+ }
+ 
+-static void updateHeap(std::vector<double*>& array, int i)
++static void updateHeap(std::vector<double*>& array, int i, HeapPositions& positions)
+ {
+   double* tmpi = array[i];
+   while (i > 0 && *(array[parent_index(i)]) > *tmpi) {
+     const int parent = parent_index(i);
+     array[i] = array[parent];
++    recordHeapPosition(positions, array[i], i);
+     i = parent;
+   }
+   array[i] = tmpi;
++  recordHeapPosition(positions, tmpi, i);
+ }
+ 
+ // remove the entry with minimum distance from Priority queue
+-static void removeMin(std::vector<double*>& array)
+-{
++static void removeMin(std::vector<double*>& array, HeapPositions& positions)
++{
++  const auto removed = positions.find(array.front());
++  if (removed->second != duplicate_position) {
++    positions.erase(removed);
++  }
++  if (array.size() == 1) {
++    array.pop_back();
++    return;
++  }
+   array[0] = array.back();
+-  heapify(array);
++  heapify(array, positions);
+   array.pop_back();
+ }
+ 
+@@ -1239,6 +1264,7 @@
+     StNetOrder();
+   }
+ 
++  HeapPositions heap_positions;
+   auto& src_heap = src_heap_2D_;
+   auto& dest_heap = dest_heap_2D_;
+   auto& d1 = d1_2D_;
+@@ -1279,14 +1305,19 @@
+ 
+     if (adj_cost >= BIG_INT) {  // neighbor has not been put into src_heap
+       src_heap.push_back(&d1[adj_y][adj_x]);
+-      updateHeap(src_heap, src_heap.size() - 1);
++      heap_positions.emplace(src_heap.back(), src_heap.size() - 1);
++      updateHeap(src_heap, src_heap.size() - 1, heap_positions);
+     } else if (adj_cost > cost) {  // neighbor has been put into src_heap
+                                    // but needs update
+       double* dtmp = &d1[adj_y][adj_x];
+-      const auto it = std::ranges::find(src_heap, dtmp);
+-      if (it != src_heap.end()) {
+-        const int pos = it - src_heap.begin();
+-        updateHeap(src_heap, pos);
++      const auto found = heap_positions.find(dtmp);
++      int pos = found == heap_positions.end() ? -1 : found->second;
++      if (pos == duplicate_position) {
++        const auto it = std::ranges::find(src_heap, dtmp);
++        pos = it == src_heap.end() ? -1 : int(it - src_heap.begin());
++      }
++      if (pos >= 0) {
++        updateHeap(src_heap, pos, heap_positions);
+       } else {
+         logger_->error(
+             GRT,
+@@ -1435,6 +1466,14 @@
+                 regionY1,
+                 regionY2);
+ 
++      heap_positions.clear();
++      for (int i = 0; i < int(src_heap.size()); ++i) {
++        auto [entry, inserted] = heap_positions.emplace(src_heap[i], i);
++        if (!inserted) {
++          entry->second = duplicate_position;
++        }
++      }
++
+       // while loop to find shortest path
+       int ind1 = (src_heap[0] - &d1[0][0]);
+       for (auto& dest : dest_heap) {
+@@ -1458,7 +1497,7 @@
+                                  : parent_y3_[curY][curX];
+         }
+ 
+-        removeMin(src_heap);
++        removeMin(src_heap, heap_positions);
+ 
+         if (curX > regionX1) {  // left
+           relaxAdjacent(
