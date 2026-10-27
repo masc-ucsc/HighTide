@@ -24,7 +24,7 @@ HT = Path('/lscratch/renau/HighTide')
 OB = Path('/var/tmp/renau/_bazel_renau/230f8e777f6bcb1c09c653c8b9466575')
 EXEC = OB / 'execroot/_main'
 SWEEP = HT / 'artifacts/lhdsweep'
-TOOLS = HT / 'tools/vslivehd'
+TOOLS = Path(__file__).resolve().parent  # this checkout's scorer and configs (a worktree runs its own)
 OPENROAD = SWEEP / 'bin/openroad'
 LHD = Path(os.environ.get('LHD', str(SWEEP / 'bin/lhd_e/lhd')))
 PLATFORM = OB / 'external/orfs+/flow/platforms/asap7'
@@ -38,7 +38,8 @@ def resolve(path):
     p = Path(path)
     if p.is_absolute():
         return p
-    for root in (EXEC, HT):
+    # The execroot links only the externals of its last build; the output base keeps them all.
+    for root in (EXEC, HT, OB):
         if (root / p).exists():
             return (root / p).resolve()
     raise FileNotFoundError(path)
@@ -163,13 +164,28 @@ def clock_period(sdc):
     return float(m[0]) if m else None
 
 
-def score_env(d, sdc):
+def score_env(d, sdc, extra_lefs=()):
     env = dict(os.environ)
     env.update(LIB_FILES=' '.join(map(str, d.lib_files())), TECH_LEF=str(PLATFORM / 'lef/asap7_tech_1x_201209.lef'),
                SC_LEF=str(PLATFORM / 'lef/asap7sc7p5t_28_R_1x_220121a.lef'),
-               ADDITIONAL_LEFS=' '.join(map(str, d.macro_lefs())), SET_RC_TCL=str(PLATFORM / 'setRC.tcl'),
+               ADDITIONAL_LEFS=' '.join(map(str, list(d.macro_lefs()) + list(extra_lefs))), SET_RC_TCL=str(PLATFORM / 'setRC.tcl'),
                SDC_FILE=str(sdc))
     return env
+
+
+def def_extra_lefs(d, def_dir):
+    """LEFs LiveHD placed with beyond the design's own (the domino bundle's domino_cells.lef),
+    from the DEF export's lefs.json (paths relative to the DEF directory)."""
+    listing = Path(def_dir) / 'lefs.json'
+    if not listing.exists():
+        return []
+    known = {p.resolve() for p in d.lef_list()}
+    out = []
+    for name in json.loads(listing.read_text()):
+        p = (Path(def_dir) / name).resolve()
+        if p not in known:
+            out.append(p)
+    return out
 
 
 def adapt_sdc(src, dst):
@@ -186,10 +202,12 @@ def adapt_sdc(src, dst):
     return dst
 
 
-def run_score(d, source, out, sdc, timeout=7200):
+def run_score(d, source, out, sdc, timeout=7200, extra_lefs=(), check_placement='error'):
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
-    env = score_env(d, sdc)
+    env = score_env(d, sdc, extra_lefs)
+    if check_placement == 'report':  # record OpenROAD's check_placement verdict instead of failing the score
+        env['SCORE_CHECK_PLACEMENT'] = 'report'
     env.update(SCORE_INPUT=str(source), SCORE_OUT=str(out))
     with open(out / 'score.log', 'w') as log:
         rc = subprocess.run([str(OPENROAD), '-no_init', '-exit', '-threads', '4', str(TOOLS / 'score_flow.tcl')],
@@ -276,11 +294,19 @@ def macro_libs(d):
 
 
 # ------------------------------------------------------------------------ run
-def run_variant(d, tag, sets, threads=1, timeout=7200, mem_gib=64, files=None):
+def run_variant(d, tag, sets, threads=1, timeout=7200, mem_gib=64, files=None, rundir=None, log=None,
+                timing_unmeasured=None, check_placement='error'):
+    """One lhd synth+place run, then OpenSTA scoring. A `sets` value of None removes that key
+    (e.g. the ORFS utilization for a fixed-core run). rundir/log default to the sweep's
+    runs/<design>/<tag> and results.jsonl. timing_unmeasured (a reason string) keeps the score's
+    cell counts and HPWL but withholds its setup WNS/TNS and penalty: the netlist has cells the
+    Liberty does not time (the provisional domino profile). check_placement='report' scores a DEF
+    that fails OpenROAD's check_placement and records the verdict (score.placement_check)."""
     import guard
     ref = json.loads((d.ref_dir / 'score/score.json').read_text())
     info = json.loads((d.ref_dir / 'info.json').read_text())
-    rundir = SWEEP / 'runs' / d.safe / tag
+    rundir = Path(rundir) if rundir else SWEEP / 'runs' / d.safe / tag
+    log = Path(log) if log else SWEEP / 'results.jsonl'
     if rundir.exists():
         raise SystemExit('run directory exists: %s (use a new tag)' % rundir)
     rundir.mkdir(parents=True)
@@ -311,6 +337,7 @@ def run_variant(d, tag, sets, threads=1, timeout=7200, mem_gib=64, files=None):
     if cfg_file.exists():  # per-design defaults found during bring-up (reader, frontend flags, ...)
         merged.update(json.loads(cfg_file.read_text()).get(d.key, {}).get('sets', {}))
     merged.update(sets)
+    merged = {k: v for k, v in merged.items() if v is not None}
     slang_args = ['-D', 'SYNTHESIS', '--compat=vcs', '--timescale=1ns/1ps']
     reader = merged.pop('reader', 'native')  # a harness-level choice, not an lhd option
     if reader == 'native':
@@ -362,27 +389,53 @@ def run_variant(d, tag, sets, threads=1, timeout=7200, mem_gib=64, files=None):
         t1 = time.monotonic()
         try:
             sdc = adapt_sdc(d.ref_dir / '3_place.sdc', rundir / 'score_pins.sdc')
-            score = run_score(d, defs[0], rundir / 'score', sdc)
+            score = run_score(d, defs[0], rundir / 'score', sdc, extra_lefs=def_extra_lefs(d, rundir / 'def'),
+                              check_placement=check_placement)
+            if timing_unmeasured:
+                score['opensta_setup_unmeasured'] = {k: score[k] for k in ('setup_wns_ps', 'setup_tns_ps', 'hold_wns_ps', 'hold_tns_ps')}
+                score.update(setup_wns_ps=None, setup_tns_ps=None, hold_wns_ps=None, hold_tns_ps=None)
+                result['timing'] = 'timing-unmeasured: %s' % timing_unmeasured
             result['score'] = score
-            result['penalty'] = penalty(score, ref, info['clock_period_ps'])
-            result['objective'] = objective(score, ref, info['clock_period_ps'])
+            if not timing_unmeasured:
+                result['penalty'] = penalty(score, ref, info['clock_period_ps'])
+                result['objective'] = objective(score, ref, info['clock_period_ps'])
         except Exception as exc:
             meta['status'] = 'score failed: %s' % exc
         meta['score_seconds'] = time.monotonic() - t1
     elif status == 'ok':
         meta['status'] = 'no DEF produced'
-    qor = rundir / 'rep/qor.json'
-    if qor.exists():
-        try:
-            q = json.loads(qor.read_text())
-            result['lhd_report'] = {k: q.get(k) for k in ('kind', 'mode', 'legal', 'gp_converged', 'gp_overflow', 'hpwl_um', 'cells')}
-        except Exception:
-            pass
+    result['lhd_report'] = lhd_report(rundir)
     (rundir / 'result_full.json').write_text(json.dumps(result, indent=1))
-    with open(SWEEP / 'results.jsonl', 'a') as f:
+    with open(log, 'a') as f:
         f.write(json.dumps(dict(design=d.key, tag=tag, sets=sets, status=meta['status'], lhd_seconds=meta['lhd_seconds'],
-                                score=result.get('score'), penalty=result.get('penalty'), ref=ref)) + '\n')
+                                score=result.get('score'), penalty=result.get('penalty'), timing=result.get('timing'),
+                                ref=ref)) + '\n')
     return result
+
+
+def lhd_report(rundir):
+    """LiveHD's own report: the placement summary, and USYN's physical (domino) block when present."""
+    out = {}
+    for name in ('qor.json', 'placement.json'):
+        p = Path(rundir) / 'rep' / name
+        if p.exists():
+            try:
+                q = json.loads(p.read_text())
+            except ValueError:
+                continue
+            out.update({k: q.get(k) for k in ('kind', 'mode', 'legal', 'gp_converged', 'gp_overflow', 'hpwl_um', 'cells',
+                                               'multirow', 'multirow_eco') if k in q})
+    usyn = Path(rundir) / 'w/synth/qor.json.usyn.json'
+    if usyn.exists():
+        try:
+            u = json.loads(usyn.read_text())
+            out['usyn'] = {k: u.get(k) for k in ('output', 'physical_profile')}
+            physical = u.get('physical')
+            if physical:
+                out['usyn']['physical'] = {k: physical.get(k) for k in ('settings', 'totals', 'bundle')}
+        except ValueError:
+            pass
+    return out
 
 
 # ------------------------------------------------------------------------ cli
