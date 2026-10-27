@@ -393,6 +393,10 @@ def prepare_lec(a, d, out, lib):
                                                                           '--emit-dir', 'lg:%s' % ref_lg]
         for k, v in sets.items():
             cmd += ['--set', '%s=%s' % (k, v)]
+        if d.macro_lefs():
+            # lhd synth resolves the fakeram macros from synth.liberty; the compile reference has no
+            # Liberty, so the macros (the only modules without RTL) stay body-less blackbox instances.
+            slang = slang + ['--ignore-unknown-modules']
         guard.run('ref_compile', cmd + ['--'] + slang, cwd=out, timeout=a.timeout, extra_env=env)
     return ref_lg, cells
 
