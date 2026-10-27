@@ -117,3 +117,13 @@ The flow reports WNS = −653 ps at the 3000 ps target. That's not a real timing
 ### Known issues / open questions
 
 - None active. **2026-06-04 toolchain upgrade**: removed the `PRE_CTS_TCL` CTS-0105 workaround (fixed upstream, #10177). Closes clean — WNS +68.8 ps, util 57.6 %, 377 350 logic cells (≈ baseline 386 497). `pre_cts.tcl` deleted.
+
+## ASAP7 TLB interface correction (2026-10-23)
+
+The legacy cell name `fakeram_16x52_1r1w` is used by the RTL for 16 entries
+of 52-bit TLB data. Its ASAP7 configuration had width 16 and depth 52,
+which truncated the actual 52-bit write data and zero-extended read data
+in the previous synthesis flow. The configuration and generated LEF/Liberty
+now describe width 52, depth 16, and four address bits. The legacy cell name
+is retained so the upstream patched instance names do not change. Cached
+results using the previous 16-bit interface are not a functional TLB reference.

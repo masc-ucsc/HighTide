@@ -152,3 +152,10 @@ asap7 macros are 2–4× larger.
 **Status**: finishing — WNS +147.2 ps, hold −374.2 ps (52 violations), util 32.3 %,
 224 313 logic cells, Fmax 0.04 GHz, die 37 526 200 µm², 0 DRC. Setup headroom is now thin
 (`period_min` 24.85 ns against a 25 ns clock); see the 2026-08 section above.
+### ASAP7 macro power-pin refresh
+
+Regenerate the seven ASAP7 LEF views from the existing configuration with the
+bsg_fakeram VDD/VSS interleaving fix. Only VDD ports change; macro dimensions,
+signal pins, obstructions and the existing Liberty views are preserved. The old
+views put VDD and VSS on identical rectangles, which native power-grid export
+correctly rejects. Both placement flows must use the corrected LEFs.

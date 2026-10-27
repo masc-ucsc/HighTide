@@ -108,3 +108,11 @@ The hand-placed coordinates from #2 above were valid for the old enormous macros
 - **2026-05-20** (R4): banks experiment shrunk macros 94% — die from 400 mm² to 49 mm².
 
 cnn-asap7 and cnn-nangate45 pass with RTLMP; only sky130's coarse pitch needed the hand grid + spread.
+
+### ASAP7 macro power-pin refresh
+
+Regenerate the four ASAP7 LEF views from the existing configuration with the
+bsg_fakeram VDD/VSS interleaving fix (`952c0d5`). Only VDD ports change;
+macro dimensions, signal pins, obstructions and Liberty views are preserved.
+The old views put VDD and VSS on identical rectangles, which native power-grid
+export correctly rejects. Both placement flows must use the corrected views.

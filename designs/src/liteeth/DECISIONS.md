@@ -110,3 +110,12 @@ FakeRAM macros live at `designs/<platform>/liteeth/sram/{lef,lib}/`.
 - ODB-1200 doesn't trigger on sky130hd, same as nangate45.
 - **2026-05-11 PPA area sweep**: UTIL 50→52 / DENSITY 0.40→0.57. Die area 3,864,920 → 3,716,410 µm² (−4 %). The baseline at UTIL=50 already had 50 max-slew + 4 max-cap DRV violations; UTIL=52 improves both (46/0). UTIL=55 fails global-route congestion.
 - **2026-06-04 toolchain upgrade**: removed `SKIP_INCREMENTAL_REPAIR` (RSZ-0074 fixed in OpenROAD 299f3015). Closes with large margin (WNS +731 ps), instance area +1.4 %, die +0.02 % — within tolerance.
+
+### ASAP7 macro power-pin refresh
+
+The committed ASAP7 LEFs predated the bsg_fakeram VDD/VSS interleaving fix
+(`952c0d5`). Refresh the two LEF views from the existing config using the
+fixed generator. Only the VDD ports change; macro dimensions, signal pins,
+obstructions and the existing Liberty views are preserved. VDD and VSS must
+not share metal rectangles: native power-grid export correctly rejects such
+an input before emitting a grid. Do not bypass that check in either flow.
