@@ -1,0 +1,12 @@
+{
+ "lhd_sha256": "1e93f010c2e6e360f30b7b1bcf7388eefc7316429937b7438c16258799f056dc",
+ "physical_repair_sha256": "fb01f5bfeba28a531e3011be89314c7652101ceda39c01d3b4dfd251f47d3f2a",
+ "head": "a7347ed2cb982de59f7587a682437741048e7159",
+ "head_subject": "Support segmented imported placement rows and fixed physical taps",
+ "dirty_files": [
+  " M pass/place/README.md",
+  " M pass/place/place.cpp"
+ ],
+ "diff_sha256": "fee88616b1e0d01aca3a59aded403b368fc2433ea2afcf441362d247de16d48f",
+ "built": "bazel build -c opt //lhd:lhd //tools:physical_repair (cache hit, completed 2026-10-26)"
+}

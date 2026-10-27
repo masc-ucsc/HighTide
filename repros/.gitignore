@@ -1,0 +1,7 @@
+# generated or local-only; see data/README.md and make_rtl_fixes.py
+__pycache__/
+*.html
+rtl_fixes/*/*.v
+rtl_fixes/*/*.sv
+rtl_fixes/*/*.patch
+data/*/
