@@ -188,6 +188,8 @@ def floorplan_frame(src_def, dst):
     head = [l for l in text.splitlines() if l.split()[:1] in (['VERSION'], ['DIVIDERCHAR'], ['BUSBITCHARS'], ['DESIGN'])
             or l.startswith('UNITS DISTANCE MICRONS') or l.startswith('DIEAREA')]
     rows = [l for l in text.splitlines() if l.startswith('ROW ')]
+    cut = len(rows)
+    rows = merge_cut_rows(rows)
     m = re.search(r'^PINS \d+ ;\n(.*?)^END PINS', text, re.M | re.S)
     pins = []
     for block in re.split(r'\n(?=\s*- )', m.group(1)) if m else []:
@@ -200,7 +202,45 @@ def floorplan_frame(src_def, dst):
     body = head + rows + ['PINS %d ;' % len(pins)] + pins + ['END PINS', 'END DESIGN']
     Path(dst).write_text('\n'.join(body) + '\n')
     return {'source': str(src_def), 'source_sha256': sha256(src_def), 'frame': str(dst), 'frame_sha256': sha256(dst),
-            'rows': len(rows), 'pins': len(pins), 'die': next((l for l in head if l.startswith('DIEAREA')), None)}
+            'rows': len(rows), 'source_row_segments': cut, 'pins': len(pins),
+            'die': next((l for l in head if l.startswith('DIEAREA')), None)}
+
+
+ROW_RE = re.compile(r'^ROW\s+(\S+)\s+(\S+)\s+(-?\d+)\s+(-?\d+)\s+(\S+)\s+DO\s+(\d+)\s+BY\s+1\s+STEP\s+(\d+)\s+0\s*;\s*$')
+
+
+def merge_cut_rows(rows):
+    """One full-width row per y. ORFS cuts the rows around its placed macros (cut_rows), which
+    leaves several segments at one y; the frame carries no components (LiveHD places the macros
+    itself), so the segments of a y are rejoined into the span from the first segment's start to
+    the last one's end. Rows that are already one per y are returned unchanged."""
+    by_y = {}
+    for line in rows:
+        m = ROW_RE.match(line)
+        if not m:
+            return rows  # an unusual row form: leave the frame as exported
+        name, site, x, y, orient, count, step = m.groups()
+        by_y.setdefault(int(y), []).append((int(x), int(count), int(step), site, orient, name))
+    if all(len(v) == 1 for v in by_y.values()):
+        return rows
+    every = [s for segs in by_y.values() for s in segs]
+    if len({s[2] for s in every}) != 1 or len({s[3] for s in every}) != 1:
+        raise SystemExit('domplace.py: row segments disagree on site or step')
+    step = every[0][2]
+    # The core span: the leftmost segment start to the rightmost segment end over every y, so
+    # each rejoined row has the same width (a macro on the core edge cuts that y's end segment).
+    x0, x1 = min(s[0] for s in every), max(s[0] + s[1] * step for s in every)
+    out = []
+    for y in sorted(by_y):
+        segs = sorted(by_y[y])
+        sites, orients = {s[3] for s in segs}, {s[4] for s in segs}
+        if len(orients) != 1:
+            raise SystemExit('domplace.py: row segments at y=%d disagree on orientation' % y)
+        if (x1 - x0) % step or any((s[0] - x0) % step for s in segs):
+            raise SystemExit('domplace.py: row segments at y=%d are off the site grid' % y)
+        out.append('ROW ROW_%d %s %d %d %s DO %d BY 1 STEP %d 0 ;' % (len(out), sites.pop(), x0, y, orients.pop(),
+                                                                       (x1 - x0) // step, step))
+    return out
 
 
 def orfs_frame(d, out):
