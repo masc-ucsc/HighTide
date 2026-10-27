@@ -46,7 +46,56 @@ tools/bazel_to_orfs.sh --run --flow-home ~/OpenROAD-flow-scripts \
   designs/asap7/lfsr synth floorplan place
 ```
 
-**What it produces.** For each design it materializes the RTL via bazel
+For a tool-neutral input export, add `--benchmark-dir`:
+
+```bash
+tools/bazel_to_orfs.sh --benchmark-dir .hightide_export all
+```
+
+```
+.hightide_export/
+  platforms/common/
+  platforms/<platform>/        shared pinned platform files + manifest.json
+  designs/<platform>/<design>/
+    inputs/                   RTL, includes, SDC, macro LEF/LIB, design Tcl
+    manifest.json             design inputs and selected configuration
+    config.mk                 ORFS configuration
+    run_orfs.sh               runs the full ORFS flow from RTL against your
+                              own ORFS install (FLOW_HOME + OPENROAD_EXE)
+```
+
+Consumers can read the versioned JSON without Make. Paths are relative to
+the manifest containing them. `design.name` is the RTL top module;
+`rtl.files` preserves source order, expanding generated directories in place.
+The platform manifest describes its default LEF/Liberty/GDS files, placement
+site, routing limits, and setup scripts. Design routing fields override the
+corresponding platform defaults.
+
+This is a portable input contract, not a complete tool-independent flow:
+synthesis arguments and Tcl scripts still use Yosys/Slang/OpenROAD syntax.
+Other tools need adapters, including synthesis-mode defines such as
+`SYNTHESIS`; absent fields do not encode every ORFS default or workaround.
+The retained `config.mk` files provide the ORFS configuration. Set
+`HIGHTIDE_BUNDLE_ROOT` to the extracted export directory when resolving them.
+
+Export requires Linux/Bazel and builds only RTL generators and configuration
+output groups—not synthesis or physical design. Use a new output directory
+after changing the platform pin. Adding `--run --flow-home <ORFS>` explicitly
+creates a runner and runs ORFS after export.
+
+### Published bundles: `publish-benchmark-bundle.yml`
+
+To publish a ready-made export, run the **Publish benchmark input bundle**
+GitHub Actions workflow (Actions tab → *Run workflow*, or
+`gh workflow run publish-benchmark-bundle.yml`). It runs the
+`--benchmark-dir all` export and attaches the zipped bundle + its `.sha256`
+to a GitHub **Release** tagged `benchmark-inputs-<commit>`. The workflow is
+manual (`workflow_dispatch`) only — never automatic — exports inputs only
+(no synthesis or place-and-route), and is free on this public repo (Release
+assets are unmetered; the per-asset cap is 2 GB). Each run publishes a new
+release, so prune stale ones occasionally.
+
+**What the default ORFS mode produces.** For each design it materializes the RTL via bazel
 (fetching the hermetic `http_archive` sources / running any RTL genrules —
 but *not* synthesis), extracts the resolved `config.mk`, and copies every
 input into a self-contained, relocatable bundle:

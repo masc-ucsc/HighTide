@@ -40,6 +40,10 @@
 #
 # Options:
 #   --run            After preparing, run the bundle now (needs --flow-home).
+#   --benchmark-dir DIR
+#                    Export inputs under DIR/designs/ and copy each pinned
+#                    ORFS platform once under DIR/platforms/. Export-only
+#                    unless combined with --run.
 #   --flow-home DIR  ORFS install to run against (its flow/ dir or root); its
 #                    tools/install must have yosys + yosys-slang.  Required with
 #                    --run; also baked into run.sh as the default FLOW_HOME.
@@ -55,6 +59,8 @@
 # Examples:
 #   # Prepare one design (bundle + instructions, no run):
 #   tools/bazel_to_orfs.sh designs/asap7/lfsr
+#   # Export all benchmark RTL, design inputs, and shared platform trees only:
+#   tools/bazel_to_orfs.sh --benchmark-dir .hightide_export all
 #   # Prepare every asap7 design as portable bundles:
 #   tools/bazel_to_orfs.sh //designs/asap7/...
 #   # Run a prepared bundle elsewhere (self-contained, no bazel):
@@ -111,6 +117,7 @@ flow_home=""
 openroad=""
 work_dir=""
 config=""
+benchmark_dir=""
 no_build=0
 run=0          # default: prepare the portable bundle only, don't run ORFS
 positional=()
@@ -119,6 +126,8 @@ flags=()   # design-independent flags, replayed to per-design child invocations
 while [ $# -gt 0 ]; do
     case "$1" in
         --run)       run=1;        flags+=("$1");      shift ;;
+        --benchmark-dir)
+                       benchmark_dir=$2; shift 2 ;;
         --flow-home) flow_home=$2; flags+=("$1" "$2"); shift 2 ;;
         --openroad)  openroad=$2;  flags+=("$1" "$2"); shift 2 ;;
         --work-dir)  work_dir=$2;  shift 2 ;;   # per-design; not replayed
@@ -143,12 +152,18 @@ targets=("${positional[@]:1}")
 repo_root=$(git rev-parse --show-toplevel)
 cd "$repo_root"
 
+if [ -n "$benchmark_dir" ]; then
+    [ -z "$work_dir" ] || { echo "ERROR: --benchmark-dir and --work-dir are mutually exclusive." >&2; exit 1; }
+    benchmark_dir=$(python3 -c 'import os, sys; print(os.path.abspath(sys.argv[1]))' "$benchmark_dir")
+    flags+=(--benchmark-dir "$benchmark_dir")
+fi
+
 # Every runnable design is a leaf package whose BUILD.bazel calls
 # hightide_design()/orfs_flow(). Container packages (NVDLA, bp_processor) and
 # platform dirs (designs/asap7) don't — they just hold subpackages.
 enumerate_designs() {   # <dir> -> prints each design package under it
     find "$1" -name BUILD.bazel 2>/dev/null | sort | while read -r bf; do
-        grep -q 'hightide_design\|orfs_flow' "$bf" && dirname "$bf"
+        grep -Eq '^[[:space:]]*(hightide_design|orfs_flow)\(' "$bf" && dirname "$bf"
     done
 }
 
@@ -174,7 +189,7 @@ if [ -n "$root" ]; then
     mapfile -t design_list < <(enumerate_designs "$root")
 else
     p=${sel%:*}; p=${p%/}       # drop any :target and trailing slash
-    if [ -f "$p/BUILD.bazel" ] && grep -q 'hightide_design\|orfs_flow' "$p/BUILD.bazel"; then
+    if [ -f "$p/BUILD.bazel" ] && grep -Eq '^[[:space:]]*(hightide_design|orfs_flow)\(' "$p/BUILD.bazel"; then
         design_list=("$p")                              # a single design
     elif [ -d "$p" ]; then
         mapfile -t design_list < <(enumerate_designs "$p")  # container/platform dir
@@ -226,13 +241,36 @@ if [ -z "$name" ]; then
 fi
 
 # --- Work dir + repo/orfs bookkeeping -------------------------------------
-if [ -z "$work_dir" ]; then
+if [ -n "$benchmark_dir" ]; then
+    work_dir="$benchmark_dir/designs/${pkg#designs/}"
+elif [ -z "$work_dir" ]; then
     rel=${pkg#designs/}
     work_dir="$repo_root/.orfs_bundles/${rel%%/*}/${rel##*/}"
 fi
 mkdir -p "$work_dir"
 platform=${pkg#designs/}; platform=${platform%%/*}
 orfs_commit=$(grep -oP 'OpenROAD-flow-scripts-\K[0-9a-f]{40}' MODULE.bazel | head -1)
+
+stage_benchmark_platform() {
+    local output_base platforms_src source_id
+    source_id="$orfs_commit:$(git hash-object MODULE.bazel)"
+    echo ">> Staging pinned ORFS platform files for $platform ..." >&2
+    output_base=$(bazel info output_base 2>/dev/null)
+    platforms_src=""
+    while IFS= read -r candidate; do
+        if [ -f "$candidate/$platform/config.mk" ]; then
+            platforms_src=$candidate
+            break
+        fi
+    done < <(find -L "$output_base/external" -maxdepth 4 -type d \
+        -path '*/flow/platforms' 2>/dev/null)
+    [ -n "$platforms_src" ] || {
+        echo "ERROR: could not locate the Bazel-managed ORFS platform '$platform'." >&2
+        exit 1
+    }
+    python3 "$repo_root/tools/stage_platform.py" \
+        "$platforms_src" "$platform" "$benchmark_dir/platforms" "$source_id"
+}
 
 # --- Materialize the RTL, extract config, stage a portable bundle ---------
 # For hermetic designs the RTL / includes live in the bazel cache (http_archive
@@ -249,6 +287,10 @@ if [ "$no_build" = 0 ]; then
     [ -n "$vfiles" ] && bazel build $vfiles >&2
 fi
 
+if [ -n "$benchmark_dir" ]; then
+    stage_benchmark_platform
+fi
+
 if [ -z "$config" ]; then
     config="$work_dir/config.mk"
     echo ">> Extracting config.mk -> $config" >&2
@@ -256,8 +298,32 @@ if [ -z "$config" ]; then
 fi
 config=$(realpath "$config")
 
+if [ -n "$benchmark_dir" ] && ! [ "$config" -ef "$work_dir/config.mk" ]; then
+    cp "$config" "$work_dir/config.mk"
+    config="$work_dir/config.mk"
+fi
+
 echo ">> Staging inputs into $work_dir/inputs (portable, self-contained) ..." >&2
-python3 "$repo_root/tools/stage_prepared_inputs.py" "$config" "$work_dir/inputs" >&2
+stage_args=()
+if [ -n "$benchmark_dir" ]; then
+    stage_args+=(
+        --manifest "$work_dir/manifest.json"
+        --platform-dir "$benchmark_dir/platforms/$platform"
+    )
+fi
+python3 "$repo_root/tools/stage_prepared_inputs.py" \
+    "${stage_args[@]}" "$config" "$work_dir/inputs" >&2
+
+if [ -n "$benchmark_dir" ]; then
+    design_rel=${work_dir#"$benchmark_dir"/}
+    cat >> "$config" <<EOF
+
+# Portable HighTide benchmark roots. Set HIGHTIDE_BUNDLE_ROOT to the export
+# directory before resolving this Make-compatible configuration.
+export PREPARED_INPUTS?=\$(HIGHTIDE_BUNDLE_ROOT)/$design_rel/inputs
+export PLATFORM_DIR?=\$(HIGHTIDE_BUNDLE_ROOT)/platforms/$platform
+EOF
+fi
 
 # --- Resolve ORFS flow + openroad (only needed to actually --run) ----------
 # The bundle runs the whole flow from RTL, so a run needs an ORFS install whose
@@ -280,26 +346,36 @@ opensta_exe=""
 # run with no bazel and no HighTide checkout — given an ORFS install (with
 # yosys + yosys-slang) and an openroad on that machine.  config.mk references
 # every input via $(PREPARED_INPUTS), which run.sh points at its own inputs/.
-run_script="$work_dir/run.sh"
+if [ -n "$benchmark_dir" ]; then
+    run_script="$work_dir/run_orfs.sh"   # published-bundle runner name
+else
+    run_script="$work_dir/run.sh"
+fi
 def_or=""; [ -n "$openroad_exe" ] && def_or=$(printf '%q' "$openroad_exe")
 def_sta=""; [ -n "$opensta_exe" ] && def_sta=$(printf '%q' "$opensta_exe")
 tq=""; for t in "${targets[@]}"; do tq+=" $(printf '%q' "$t")"; done
+rs=$(basename "$run_script")
 {
     echo '#!/usr/bin/env bash'
     echo '# Auto-generated by tools/bazel_to_orfs.sh.  Self-contained portable bundle:'
-    echo '# inputs/ + config.mk + run.sh — copy this whole dir to any machine and'
+    echo "# inputs/ + config.mk + $rs — copy this whole dir to any machine and"
     echo '# run the full ORFS flow from RTL, with no bazel and no HighTide checkout.'
     echo '# The target machine needs an OpenROAD-flow-scripts install whose'
     echo '# tools/install has yosys + yosys-slang, plus an openroad binary:'
     echo '#   FLOW_HOME=/path/to/OpenROAD-flow-scripts \'
-    echo '#   OPENROAD_EXE=/path/to/openroad ./run.sh'
-    echo '#   ./run.sh floorplan place                  # pick targets'
+    echo "#   OPENROAD_EXE=/path/to/openroad ./$rs"
+    echo "#   ./$rs floorplan place                  # pick targets"
     echo 'set -euo pipefail'
     echo 'here="$(cd "$(dirname "$0")" && pwd)"'
     echo 'cd "$here"'
     echo '# Inputs were staged under this bundle; config.mk references them via'
     echo '# $(PREPARED_INPUTS), so they resolve wherever the bundle is copied.'
     echo 'export PREPARED_INPUTS="$here/inputs"'
+    if [ -n "$benchmark_dir" ]; then
+        root_rel=$(python3 -c 'import os, sys; print(os.path.relpath(sys.argv[1], sys.argv[2]))' \
+            "$benchmark_dir" "$work_dir")
+        printf 'export HIGHTIDE_BUNDLE_ROOT="$(cd "$here/%s" && pwd)"\n' "$root_rel"
+    fi
     printf 'flow_home=${FLOW_HOME:-%q}\n' "$flow_dir"
     printf 'openroad_exe=${OPENROAD_EXE:-%s}\n' "${def_or:-\"\"}"
     printf 'opensta_exe=${OPENSTA_EXE:-%s}\n' "${def_sta:-\"\"}"
@@ -326,7 +402,7 @@ if [ "$run" = 0 ]; then
 
 >> Prepared (not run) — $platform / $name
    bundle   : $work_dir
-              (portable: inputs/ + config.mk + run.sh; copy it anywhere)
+              (portable: inputs/ + config.mk + $(basename "$run_script"); copy it anywhere)
    targets  : ${targets[*]}
 
    Run it — on this or any machine (needs an ORFS install with yosys + slang):
