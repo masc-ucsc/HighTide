@@ -1,0 +1,81 @@
+# MASC fork notes: LiveHD synthesis + placement of HighTide designs
+
+This fork is VLSIDA/HighTide `main` plus one small commit. The commit adds only:
+
+| File | Purpose |
+|---|---|
+| `README.masc` | this file |
+| `tools/lhd_place.sh` | LiveHD synthesis + placement (no CTS, no routing) for sha3 / liteeth on asap7 / sky130hd |
+| `tools/merge_liberty.py` | merges the asap7 standard-cell Liberty files into the one file `lhd` reads |
+| `designs/src/liteeth/BUILD.bazel` | portable `sed -i.bak` (BSD sed on macOS) |
+| `.gitignore` | ignores `runs/` |
+
+The earlier fork work (`tools/vslivehd`, `Makefile.sample`, `vslivehd.md`, design baseline fixes, macOS
+patches) is not in this tree. It lives at commit `0cb376c` (the old `origin/main`).
+
+## Run it
+
+```sh
+# 1. LiveHD binary (default ../livehd/bazel-bin/lhd/lhd; override with LHD=...)
+(cd ../livehd && bazel build //lhd:lhd)
+
+# 2. ORFS platform files (one-time). Only flow/platforms is used. The commit is the
+#    orfs.source commit in MODULE.bazel; update it when upstream bumps ORFS.
+git clone --filter=blob:none --no-checkout https://github.com/The-OpenROAD-Project/OpenROAD-flow-scripts.git ../OpenROAD-flow-scripts
+(cd ../OpenROAD-flow-scripts && git sparse-checkout init --cone \
+   && git sparse-checkout set flow/platforms/asap7 flow/platforms/sky130hd \
+   && git checkout 3f8ab4ebeb3a886a88fc0774b176c77a18905718)
+
+# 3. Run: <asap7|sky130hd> <sha3|liteeth> [run-dir]
+tools/lhd_place.sh asap7 liteeth
+tools/lhd_place.sh sky130hd sha3 runs/my-trial
+```
+
+Outputs are in `runs/<platform>-<design>/`: `handoff/out.def` (placed design), `netlist.v`, `result.json`
+(status, `error` on failure), `lhd.log`, and `livehd/logs/NNN_*.log` per pass.
+A run directory is reusable but LiveHD may reuse cached stages; delete it for a clean run.
+
+Environment overrides: `LHD`, `ORFS`, `THREADS` (default 4), `BAZEL`, `BAZEL_FLAGS`, `EXTRA`
+(extra `lhd synth` arguments, e.g. `EXTRA="--set synth.place.policy.fast=true"`).
+
+## What the script does
+
+- Generates the RTL with Bazel (`//designs/src/sha3:rtl`, `//designs/src/liteeth:liteeth_rtl`).
+- Passes the technology inputs the ORFS flow reads: Liberty, tech/cell/macro LEFs, the design SDC, `setRC.tcl`,
+  `make_tracks.tcl`. asap7 uses the RVT FF libraries with the ORFS dont-use list; sky130hd uses tt_025C_1v80.
+  fakeram macro Liberty files are appended in their native units.
+- Sizes the die from the design's ORFS `CORE_UTILIZATION` (sha3 70% asap7 / 30% sky130hd, liteeth 38% / 45%).
+  Update the `case` table in the script if a design's BUILD.bazel changes. Everything else keeps LiveHD defaults.
+- liteeth only: `--set synth.place.unknown_const=zero`. The ASIC patch comments out the ROM `$readmemh` inits,
+  leaving ROM bits undefined (`mem_6b5b`); without this setting placement stops with
+  "physical net has an unknown constant". liteeth also gets the macro halo (10 um asap7, 30 um sky130hd).
+
+## macOS notes
+
+- Bazel's Chisel/Maven fetch (sha3) fails on a JDK where `-noverify` was removed (JDK 27). Use JDK 25:
+  `export JAVA_HOME=/Library/Java/JavaVirtualMachines/temurin-25.jdk/Contents/Home`, then
+  `BAZEL_FLAGS="--repo_env=JAVA_HOME=$JAVA_HOME" tools/lhd_place.sh asap7 sha3`
+- Do not build `@orfs` through Bazel on macOS: `MODULE.bazel` `patch_cmds` use GNU `sed -i` and fail. That is why
+  the ORFS platform files come from the sparse clone above. (Not fixed here, to stay in sync with upstream.)
+
+## Last verified (2026-11-27, upstream `6a2b3b4`, bazel-orfs `805ffd6`)
+
+| Platform | Design | Placed components | Macros | Result |
+|---|---|---|---|---|
+| asap7 | sha3 | ~18.3k | - | pass |
+| sky130hd | sha3 | ~21.2k | - | pass |
+| asap7 | liteeth | ~19.8k | 5 | pass |
+| sky130hd | liteeth | ~16.2k | 5 | pass |
+
+Timing (WNS/TNS) was not checked, and CTS / routing are out of scope.
+
+## Syncing with upstream next time
+
+```sh
+git fetch upstream            # upstream = https://github.com/VLSIDA/HighTide.git
+git rebase upstream/main      # one commit on top, so conflicts should be rare
+git submodule update --init bazel-orfs
+```
+
+Then rerun the four commands above. Because the fork is rebased, pushing to `origin` needs
+`git push --force-with-lease`.

@@ -26,3 +26,6 @@ tmp/
 # designs/<platform>/<design>/sram/{lef,lib}/ and tracked there.
 designs/src/*/dev/generated/sram/
 scratch/
+
+# LiveHD runs (tools/lhd_place.sh)
+runs/
